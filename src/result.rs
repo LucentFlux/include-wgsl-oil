@@ -1,0 +1,71 @@
+use std::error::Error;
+
+use naga_to_tokenstream::ModuleToTokens;
+
+use crate::source::Sourcecode;
+
+/// The output of the transformations provided by this crate.
+pub(crate) struct ShaderResult {
+    source: Sourcecode,
+    module: naga::Module,
+}
+
+impl ShaderResult {
+    pub(crate) fn new(source: Sourcecode, module: naga::Module) -> Self {
+        Self { source, module }
+    }
+
+    pub(crate) fn validate(&mut self) -> Option<naga::valid::ModuleInfo> {
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        match validator.validate(&self.module) {
+            Ok(info) => Some(info),
+            Err(e) => {
+                let mut e_base: &dyn Error = e.as_inner();
+                let mut message = format!("{}", e);
+                while let Some(e) = e_base.source() {
+                    message = format!("{}: {}", message, e);
+                    e_base = e;
+                }
+
+                self.source.push_error(message);
+
+                None
+            }
+        }
+    }
+
+    pub(crate) fn to_items(&mut self) -> Vec<syn::Item> {
+        let mut items = Vec::new();
+
+        // Errors
+        for msg in self.source.errors() {
+            items.push(syn::parse_quote! {
+                compile_error!(#msg);
+            });
+        }
+
+        // Dependencies, to re-run macro on shader change
+        let origin = self
+            .source
+            .invocation_path()
+            .parent()
+            .map(|path| path.to_path_buf())
+            .expect("source should have a parent directory");
+        for dependent in self.source.dependents() {
+            let dependent =
+                pathdiff::diff_paths(dependent, &origin).expect("relative path should be easy");
+            let dependent = dependent.to_string_lossy();
+            items.push(syn::parse_quote! {
+                const _: &[u8] = include_bytes!(#dependent);
+            });
+        }
+
+        let mut module_items = self.module.to_items();
+        items.append(&mut module_items);
+
+        items
+    }
+}
