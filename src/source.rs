@@ -161,14 +161,7 @@ impl Sourcecode {
             self.dependents.push(absolute_path);
 
             if let Err(e) = res {
-                let mut e_base: &dyn Error = &e;
-                let mut message = format!("{}", e);
-                while let Some(e) = e_base.source() {
-                    message = format!("{}: {}", message, e);
-                    e_base = e;
-                }
-
-                self.push_error(message)
+                self.push_error(crate::error::format_compose_error(e, &source, &composer))
             }
         }
 
@@ -183,14 +176,7 @@ impl Sourcecode {
         match res {
             Ok(module) => Some(module),
             Err(e) => {
-                let mut e_base: &dyn Error = &e;
-                let mut message = format!("{}", e);
-                while let Some(e) = e_base.source() {
-                    message = format!("{}: {}", message, e);
-                    e_base = e;
-                }
-
-                self.push_error(message);
+                self.push_error(crate::error::format_compose_error(e, &self.src, &composer));
 
                 None
             }
