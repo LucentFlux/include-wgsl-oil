@@ -1,4 +1,4 @@
-use std::{collections::HashMap, error::Error, ffi::OsStr, path::PathBuf};
+use std::{collections::HashMap, ffi::OsStr, path::PathBuf};
 
 use naga_oil::compose::{
     ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderLanguage,
@@ -30,6 +30,7 @@ fn all_child_shaders(root: PathBuf, paths: &mut Vec<PathBuf>) {
             e
         ),
     };
+    let mut dirs = Vec::new();
     for file in read {
         let file = match file {
             Ok(file) => file,
@@ -40,8 +41,11 @@ fn all_child_shaders(root: PathBuf, paths: &mut Vec<PathBuf>) {
         if path.is_file() && is_shader_extension(&path) {
             paths.push(std::fs::canonicalize(path).expect("shader file path canonicalize failure"))
         } else if file.path().is_dir() {
-            all_child_shaders(file.path(), paths);
+            dirs.push(file.path());
         }
+    }
+    for dir in dirs {
+        all_child_shaders(dir, paths);
     }
 }
 
@@ -161,7 +165,7 @@ impl Sourcecode {
             self.dependents.push(absolute_path);
 
             if let Err(e) = res {
-                self.push_error(crate::error::format_compose_error(e, &source, &composer))
+                self.push_error(crate::error::format_compose_error(e, &composer))
             }
         }
 
@@ -176,7 +180,7 @@ impl Sourcecode {
         match res {
             Ok(module) => Some(module),
             Err(e) => {
-                self.push_error(crate::error::format_compose_error(e, &self.src, &composer));
+                self.push_error(crate::error::format_compose_error(e, &composer));
 
                 None
             }
