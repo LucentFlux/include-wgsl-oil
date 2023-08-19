@@ -1,8 +1,8 @@
-use std::error::Error;
+use std::{collections::HashMap, error::Error};
 
 use naga_to_tokenstream::ModuleToTokens;
 
-use crate::source::Sourcecode;
+use crate::{any_module_identifiers_start_with, source::Sourcecode};
 
 /// The output of the transformations provided by this crate.
 pub(crate) struct ShaderResult {
@@ -54,15 +54,33 @@ impl ShaderResult {
             .parent()
             .map(|path| path.to_path_buf())
             .expect("source should have a parent directory");
-        for dependent in self.source.dependents() {
-            let dependent =
-                pathdiff::diff_paths(dependent, &origin).expect("relative path should be easy");
+        let mut dedecorated_names = HashMap::new();
+        for (dependent_module_name, dependent_path) in self.source.dependents() {
+            let sanitized_name =
+                naga_oil::compose::Composer::decorated_name(Some(dependent_module_name), "");
+            if !any_module_identifiers_start_with(&self.module, &sanitized_name) {
+                continue;
+            }
+
+            dedecorated_names.insert(
+                sanitized_name,
+                dependent_module_name.replace("/", "_").replace(".", "_"),
+            );
+
+            let dependent = pathdiff::diff_paths(dependent_path, &origin)
+                .expect("relative path should be easy");
             let dependent = dependent.to_string_lossy();
             items.push(syn::parse_quote! {
                 const _: &[u8] = include_bytes!(#dependent);
             });
         }
+        let source = self.source.requested_path();
+        items.push(syn::parse_quote! {
+            const _: &[u8] = include_bytes!(#source);
+        });
 
+        // Convert to info about the module
+        undecorate_names(self.module);
         let mut module_items = self.module.to_items();
         items.append(&mut module_items);
 

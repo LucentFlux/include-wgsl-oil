@@ -92,15 +92,16 @@ fn try_read_alternate_path(
 /// Shader sourcecode generated from the token stream provided
 pub(crate) struct Sourcecode {
     src: String,
+    requested_path_input: String,
     source_path: PathBuf,
     invocation_path: PathBuf,
     errors: Vec<String>,
-    dependents: Vec<PathBuf>,
+    dependents: Vec<(String, PathBuf)>,
 }
 
 impl Sourcecode {
-    pub(crate) fn new(invocation_path: PathBuf, requested_path: String) -> Self {
-        let requested_path = std::path::PathBuf::from(requested_path);
+    pub(crate) fn new(invocation_path: PathBuf, requested_path_input: String) -> Self {
+        let requested_path = std::path::PathBuf::from(requested_path_input.clone());
 
         // Interpret as absolute
         let mut src =
@@ -129,6 +130,7 @@ impl Sourcecode {
 
         Self {
             src,
+            requested_path_input,
             source_path,
             invocation_path,
             errors: Vec::new(),
@@ -153,16 +155,21 @@ impl Sourcecode {
                 Err(_) => continue,
             };
 
+            if source.contains("#define") {
+                continue;
+            }
+
+            let name = relative_path.to_string_lossy().as_ref().to_owned();
             let res = composer.add_composable_module(ComposableModuleDescriptor {
                 source: &source,
                 file_path: &absolute_path.to_string_lossy(),
                 language,
-                as_name: Some(relative_path.to_string_lossy().as_ref().to_owned()),
+                as_name: Some(name.clone()),
                 additional_imports: &[],
                 shader_defs: HashMap::default(),
             });
 
-            self.dependents.push(absolute_path);
+            self.dependents.push((name, absolute_path));
 
             if let Err(e) = res {
                 self.push_error(crate::error::format_compose_error(e, &composer))
@@ -201,8 +208,12 @@ impl Sourcecode {
         self.errors.iter()
     }
 
-    pub(crate) fn dependents(&self) -> impl Iterator<Item = &PathBuf> {
+    pub(crate) fn dependents(&self) -> impl Iterator<Item = &(String, PathBuf)> {
         self.dependents.iter()
+    }
+
+    pub(crate) fn requested_path(&self) -> &str {
+        &self.requested_path_input
     }
 
     pub(crate) fn invocation_path(&self) -> PathBuf {

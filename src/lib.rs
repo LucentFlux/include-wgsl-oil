@@ -25,6 +25,37 @@ fn find_me(root: &str, pattern: &str) -> Option<PathBuf> {
     None
 }
 
+fn any_module_identifiers_start_with(module: &naga::Module, pat: &str) -> bool {
+    for (_, ty) in module.types.iter() {
+        if let Some(name) = ty.name.as_ref() {
+            if name.starts_with(pat) {
+                return true;
+            }
+        }
+    }
+    for (_, con) in module.constants.iter() {
+        if let Some(name) = con.name.as_ref() {
+            if name.starts_with(pat) {
+                return true;
+            }
+        }
+    }
+    for (_, func) in module.functions.iter() {
+        if let Some(name) = func.name.as_ref() {
+            if name.starts_with(pat) {
+                return true;
+            }
+        }
+    }
+    for entry in module.entry_points.iter() {
+        if entry.name.starts_with(pat) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 #[proc_macro]
 pub fn include_wgsl_oil(path: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let requested_path = syn::parse_macro_input!(path as syn::LitStr);
