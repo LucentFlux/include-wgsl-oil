@@ -80,7 +80,6 @@ impl ShaderResult {
         });
 
         // Convert to info about the module
-        undecorate_names(self.module);
         let mut module_items = self.module.to_items();
         items.append(&mut module_items);
 
