@@ -26,6 +26,10 @@ pub(crate) fn format_compose_error(e: ComposerError, composer: &Composer) -> Str
             format!("wgsl parsing error: {}", e.emit_to_string(&source))
         }
         ComposerErrorInner::GlslParseError(e) => format!("glsl parsing error(s): {:?}", e),
+        ComposerErrorInner::ShaderValidationError(e) => format!(
+            "failed to build a valid final module: {0}",
+            e.emit_to_string(&source)
+        ),
         _ => format!("{}", e),
     }
 }

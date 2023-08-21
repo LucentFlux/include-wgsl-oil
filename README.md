@@ -60,6 +60,19 @@ Then `special_shader.wgsl` is able to include `general_shader.wgsl`, and would d
 GeneralShader::foo();
 ```
 
+# Definitions
+
+The following definitions are added to pass information from Rust to your shaders:
+
+- `__DEBUG` is defined as `true` iff your project is being built in debug mode.
+
+So in your shaders included by this crate, you can do something like the following:
+```wgsl
+#if __DEBUG
+    do_something_debug();
+#endif
+```
+
 # Generated Items
 
 For a full list of the items generated when including a module with this macro, see the [`naga-to-tokenstream`](https://crates.io/crates/naga-to-tokenstream) documentation. 

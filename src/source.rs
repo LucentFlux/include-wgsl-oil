@@ -142,7 +142,15 @@ impl Sourcecode {
     fn compose(&mut self) -> Option<naga::Module> {
         let mut composer = Composer::default();
         composer.capabilities = naga::valid::Capabilities::all();
-        composer.validate = true;
+        composer.validate = false;
+
+        let mut shader_defs = HashMap::new();
+        if cfg!(debug_assertions) {
+            shader_defs.insert(
+                "__DEBUG".to_string(),
+                naga_oil::compose::ShaderDefValue::Bool(true),
+            );
+        }
 
         for (absolute_path, relative_path) in all_shaders_in_project() {
             let language = match get_shader_extension(&absolute_path) {
@@ -166,7 +174,7 @@ impl Sourcecode {
                 language,
                 as_name: Some(name.clone()),
                 additional_imports: &[],
-                shader_defs: HashMap::default(),
+                shader_defs: shader_defs.clone(),
             });
 
             self.dependents.push((name, absolute_path));
@@ -180,7 +188,7 @@ impl Sourcecode {
             source: &self.src,
             file_path: &self.source_path.to_string_lossy(),
             shader_type: naga_oil::compose::ShaderType::Wgsl,
-            shader_defs: HashMap::new(),
+            shader_defs,
             additional_imports: &[],
         });
 

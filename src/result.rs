@@ -25,9 +25,11 @@ impl ShaderResult {
             Err(e) => {
                 let mut e_base: &dyn Error = e.as_inner();
                 let mut message = format!("{}", e);
+                let mut error_count = 1;
                 while let Some(e) = e_base.source() {
-                    message = format!("{}: {}", message, e);
+                    message = format!("{}: \n{}{}", message, "    ".repeat(error_count), e);
                     e_base = e;
+                    error_count += 1;
                 }
 
                 self.source.push_error(message);
