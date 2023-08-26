@@ -1,6 +1,6 @@
 use std::{collections::HashMap, error::Error};
 
-use naga_to_tokenstream::ModuleToTokens;
+use naga_to_tokenstream::{ModuleToTokens, ModuleToTokensConfig};
 
 use crate::{any_module_identifiers_start_with, source::Sourcecode};
 
@@ -82,7 +82,9 @@ impl ShaderResult {
         });
 
         // Convert to info about the module
-        let mut module_items = self.module.to_items();
+        let mut module_items = self.module.to_items(ModuleToTokensConfig {
+            structs_filter: Some(self.source.exports().clone()),
+        });
         items.append(&mut module_items);
 
         items

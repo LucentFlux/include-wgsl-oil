@@ -1,8 +1,13 @@
-use std::{collections::HashMap, ffi::OsStr, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    ffi::OsStr,
+    path::PathBuf,
+};
 
 use naga_oil::compose::{
     ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderLanguage,
 };
+use regex::Regex;
 
 use crate::result::ShaderResult;
 
@@ -89,9 +94,14 @@ fn try_read_alternate_path(
     };
 }
 
+lazy_static::lazy_static! {
+    static ref FIND_EXPORTS: Regex = Regex::new(r"@export\s+struct\s+([^\s]+)").unwrap();
+}
+
 /// Shader sourcecode generated from the token stream provided
 pub(crate) struct Sourcecode {
     src: String,
+    exports: HashSet<String>,
     requested_path_input: String,
     source_path: PathBuf,
     invocation_path: PathBuf,
@@ -128,8 +138,18 @@ impl Sourcecode {
             Err(_) => panic!("failed to find or read shader sourcecode"),
         };
 
+        let mut exports = HashSet::new();
+        let src = FIND_EXPORTS
+            .replace_all(&src, |group: &regex::Captures<'_>| {
+                let name = group.get(1).unwrap().as_str();
+                exports.insert(name.to_owned());
+                format!(" struct {} ", name)
+            })
+            .into_owned();
+
         Self {
             src,
+            exports,
             requested_path_input,
             source_path,
             invocation_path,
@@ -166,6 +186,8 @@ impl Sourcecode {
             if source.contains("#define") {
                 continue;
             }
+
+            let source = source.replace("@export", "");
 
             let name = relative_path.to_string_lossy().as_ref().to_owned();
             let res = composer.add_composable_module(ComposableModuleDescriptor {
@@ -226,5 +248,9 @@ impl Sourcecode {
 
     pub(crate) fn invocation_path(&self) -> PathBuf {
         self.invocation_path.clone()
+    }
+
+    pub(crate) fn exports(&self) -> &HashSet<String> {
+        &self.exports
     }
 }

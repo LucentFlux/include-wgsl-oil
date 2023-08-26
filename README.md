@@ -60,6 +60,32 @@ Then `special_shader.wgsl` is able to include `general_shader.wgsl`, and would d
 GeneralShader::foo();
 ```
 
+# Exported Types
+
+Structs defined in your shader can be exported as an equivalent Rust struct. To do this, each of the fields of the struct must be representable, for example by enabling the `glam` feature to represent vectors and matrices, and then your struct definition must be prepended with an `@export` tag, as follows:
+
+```wgsl
+@export struct MyStruct {
+    foo: u32,
+    bar: i32
+}
+```
+
+Then, in your Rust file, you can do the following:
+
+```rust ignore
+mod my_shader {
+    include_wgsl_oil::include_wgsl_oil! {"path/to/shader.wgsl"}
+}
+
+let my_instance = my_shader::types::MyStruct {
+    foo: 12,
+    bar: -7
+};
+```
+
+The `encase` feature on this crate makes every exported struct derive `encase::ShaderType`. Note that this may invalidate exported structs, as some types (such as `bool`s) cannot be encoded with `encase`, however it is assumed that the only structs that you would want to export are structs that your program shares between host and GPU, and so should be encodable.
+
 # Definitions
 
 The following definitions are added to pass information from Rust to your shaders:
