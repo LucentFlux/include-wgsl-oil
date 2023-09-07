@@ -1,25 +1,31 @@
 use naga_oil::compose::{Composer, ComposerError, ComposerErrorInner};
 
 pub(crate) fn format_compose_error(e: ComposerError, composer: &Composer) -> String {
-    let source = match &e.source {
-        naga_oil::compose::ErrSource::Module(name, _) => composer
-            .module_sets
-            .get(name)
-            .expect(&format!(
-                "while handling error could not find module {}: {:?}",
-                name, e
-            ))
-            .substituted_source
-            .clone(),
+    let (source, offset) = match &e.source {
+        naga_oil::compose::ErrSource::Module {
+            name,
+            offset,
+            defs: _,
+        } => {
+            let source = composer
+                .module_sets
+                .get(name)
+                .expect(&format!(
+                    "while handling error could not find module {}: {:?}",
+                    name, e
+                ))
+                .sanitized_source
+                .clone();
+            (source, *offset)
+        }
         naga_oil::compose::ErrSource::Constructing {
             source,
             path: _,
             offset,
-        } => vec![' '; *offset]
-            .into_iter()
-            .chain(source.chars())
-            .collect(),
+        } => (source.clone(), *offset),
     };
+
+    let source = " ".repeat(offset) + &source;
 
     match e.inner {
         ComposerErrorInner::WgslParseError(e) => {

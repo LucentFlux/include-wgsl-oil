@@ -162,7 +162,7 @@ impl Sourcecode {
     fn compose(&mut self) -> Option<naga::Module> {
         let mut composer = Composer::default();
         composer.capabilities = naga::valid::Capabilities::all();
-        composer.validate = false;
+        composer.validate = true;
 
         let mut shader_defs = HashMap::new();
         if cfg!(debug_assertions) {
