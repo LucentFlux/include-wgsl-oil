@@ -1,86 +1,19 @@
+mod defs;
+mod sources;
+// This file needs a refactor. Data dependencies aren't obvious and it's soon going to become spaghetti.
+// Also, the root of the import system needs correcting for the examples, and the error system needs to become enums not strings
+
 use std::{
     collections::{HashMap, HashSet},
-    ffi::OsStr,
     path::PathBuf,
 };
 
 use naga_oil::compose::{
-    ComposableModuleDescriptor, Composer, NagaModuleDescriptor, ShaderLanguage,
+    ComposableModuleDescriptor, Composer, ComposerError, ComposerErrorInner, NagaModuleDescriptor,
 };
 use regex::Regex;
 
 use crate::result::ShaderResult;
-
-fn get_shader_extension(path: &PathBuf) -> Option<ShaderLanguage> {
-    match path.extension().and_then(OsStr::to_str) {
-        None => None,
-        Some(v) => match v {
-            "wgsl" => Some(ShaderLanguage::Wgsl),
-            "glsl" => Some(ShaderLanguage::Glsl),
-            _ => None,
-        },
-    }
-}
-
-fn is_shader_extension(path: &PathBuf) -> bool {
-    get_shader_extension(path).is_some()
-}
-
-fn all_child_shaders(root: PathBuf, paths: &mut Vec<PathBuf>) {
-    let read = match root.read_dir() {
-        Ok(fs) => fs,
-        Err(e) => panic!(
-            "could not read source directory {}: {:?}",
-            root.display(),
-            e
-        ),
-    };
-    let mut dirs = Vec::new();
-    for file in read {
-        let file = match file {
-            Ok(file) => file,
-            Err(e) => panic!("could not read source entry: {}", e),
-        };
-
-        let path = file.path();
-        if path.is_file() && is_shader_extension(&path) {
-            paths.push(std::fs::canonicalize(path).expect("shader file path canonicalize failure"))
-        } else if file.path().is_dir() {
-            dirs.push(file.path());
-        }
-    }
-    for dir in dirs {
-        all_child_shaders(dir, paths);
-    }
-}
-
-/// Gives a vector of (Absolute Path, Relative to `src` folder Path) tuples for each shader in the repository.
-fn all_shaders_in_project() -> Vec<(PathBuf, PathBuf)> {
-    let root = std::env::var("CARGO_MANIFEST_DIR").expect("proc macros should be run using cargo");
-    let src_root = std::path::Path::new(&root).join("src");
-    let src_root =
-        std::fs::canonicalize(src_root).expect("src root should exist for crate being compiled");
-
-    assert!(
-        src_root.exists() && src_root.is_dir(),
-        "could not find source directory when composing shader"
-    );
-
-    let mut paths = Vec::new();
-    all_child_shaders(src_root.clone(), &mut paths);
-
-    paths
-        .into_iter()
-        .map(move |path| {
-            let subpath = path
-                .strip_prefix(&src_root)
-                .expect("all child paths are children")
-                .to_path_buf();
-
-            (path, subpath)
-        })
-        .collect()
-}
 
 fn try_read_alternate_path(
     result: &mut std::io::Result<(String, PathBuf)>,
@@ -107,6 +40,9 @@ pub(crate) struct Sourcecode {
     invocation_path: PathBuf,
     errors: Vec<String>,
     dependents: Vec<(String, PathBuf)>,
+
+    /// Keep a list of the modules that the user might think they would be able to import, and the reasons they can't.
+    invalid_imports: HashMap<String, String>,
 }
 
 impl Sourcecode {
@@ -155,6 +91,47 @@ impl Sourcecode {
             invocation_path,
             errors: Vec::new(),
             dependents: Vec::new(),
+            invalid_imports: HashMap::new(),
+        }
+    }
+
+    fn format_compose_error(&self, e: ComposerError, composer: &Composer) -> String {
+        let (source, offset) = match &e.source {
+            naga_oil::compose::ErrSource::Module {
+                name,
+                offset,
+                defs: _,
+            } => {
+                let source = composer
+                    .module_sets
+                    .get(name)
+                    .expect(&format!(
+                        "while handling error could not find module {}: {:?}",
+                        name, e
+                    ))
+                    .sanitized_source
+                    .clone();
+                (source, *offset)
+            }
+            naga_oil::compose::ErrSource::Constructing {
+                source,
+                path: _,
+                offset,
+            } => (source.clone(), *offset),
+        };
+
+        let source = " ".repeat(offset) + &source;
+
+        match e.inner {
+            ComposerErrorInner::WgslParseError(e) => {
+                format!("wgsl parsing error: {}", e.emit_to_string(&source))
+            }
+            ComposerErrorInner::GlslParseError(e) => format!("glsl parsing error(s): {:?}", e),
+            ComposerErrorInner::ShaderValidationError(e) => format!(
+                "failed to build a valid final module: {0}",
+                e.emit_to_string(&source)
+            ),
+            _ => format!("{}", e),
         }
     }
 
@@ -172,24 +149,8 @@ impl Sourcecode {
             );
         }
 
-        for (absolute_path, relative_path) in all_shaders_in_project() {
-            let language = match get_shader_extension(&absolute_path) {
-                None => continue,
-                Some(language) => language,
-            };
-
-            let source = match std::fs::read_to_string(&absolute_path) {
-                Ok(source) => source,
-                Err(_) => continue,
-            };
-
-            if source.contains("#define") {
-                continue;
-            }
-
-            let source = source.replace("@export", "");
-
-            let name = relative_path.to_string_lossy().as_ref().to_owned();
+        for source_shader in sources::all_shaders_in_project() {
+            let source = source.replace("@export", "       ");
             let res = composer.add_composable_module(ComposableModuleDescriptor {
                 source: &source,
                 file_path: &absolute_path.to_string_lossy(),
@@ -199,11 +160,16 @@ impl Sourcecode {
                 shader_defs: shader_defs.clone(),
             });
 
-            self.dependents.push((name, absolute_path));
-
             if let Err(e) = res {
-                self.push_error(crate::error::format_compose_error(e, &composer))
+                let err = format!(
+                    "imported shader file {name} had a composer error: {}",
+                    self.format_compose_error(e, &composer)
+                );
+                self.invalid_imports.insert(name, err);
+                continue;
             }
+
+            self.dependents.push((name, absolute_path));
         }
 
         let res = composer.make_naga_module(NagaModuleDescriptor {
@@ -216,11 +182,7 @@ impl Sourcecode {
 
         match res {
             Ok(module) => Some(module),
-            Err(e) => {
-                self.push_error(crate::error::format_compose_error(e, &composer));
-
-                None
-            }
+            Err(e) => self.push_error(self.format_compose_error(e, &composer)),
         }
     }
 
