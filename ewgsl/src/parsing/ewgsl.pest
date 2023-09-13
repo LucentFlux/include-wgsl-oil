@@ -6,23 +6,25 @@ MULTILINE_COMMENT = _{ "/*" ~ (MULTILINE_COMMENT | (!"/*" ~ !"*/" ~ ANY))* ~ "*/
 COMMENT           = _{ LINE_COMMENT | MULTILINE_COMMENT }
 
 BOOLEAN_LITERAL       =  { "true" | "false" }
+INT_LITERAL_SUFFIX    = @{ ("i" | "u") ~ !CONTINUE }
 DECIMAL_INT_LITERAL   = @{
-    ("0" ~ ("i" | "u")?)
-  | (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* ~ ("i" | "u")?)
+    ("0" ~ INT_LITERAL_SUFFIX?)
+  | (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* ~ INT_LITERAL_SUFFIX?)
 }
-HEX_INT_LITERAL       = @{ "0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT+ ~ ("i" | "u")? }
+HEX_INT_LITERAL       = @{ "0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT+ ~ INT_LITERAL_SUFFIX? }
 INT_LITERAL           = @{ DECIMAL_INT_LITERAL | HEX_INT_LITERAL }
+FLOAT_LITERAL_SUFFIX  = @{ ("f" | "h") ~ !CONTINUE }
 DECIMAL_FLOAT_LITERAL = @{
-    ("0" ~ ("f" | "h"))
-  | (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* ~ ("f" | "h"))
-  | (ASCII_DIGIT* ~ "." ~ ASCII_DIGIT+ ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)? ~ ("f" | "h")?)
-  | (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)? ~ ("f" | "h")?)
-  | (ASCII_DIGIT+ ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ ("f" | "h")?)
+    ("0" ~ FLOAT_LITERAL_SUFFIX)
+  | (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT* ~ FLOAT_LITERAL_SUFFIX)
+  | (ASCII_DIGIT* ~ "." ~ ASCII_DIGIT+ ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)? ~ FLOAT_LITERAL_SUFFIX?)
+  | (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT* ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)? ~ FLOAT_LITERAL_SUFFIX?)
+  | (ASCII_DIGIT+ ~ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ FLOAT_LITERAL_SUFFIX?)
 }
 HEX_FLOAT_LITERAL     = @{
-    ("0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT* ~ "." ~ ASCII_HEX_DIGIT+ ~ (("p" | "P") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ ("f" | "h")?)?)
-  | ("0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT+ ~ "." ~ ASCII_HEX_DIGIT* ~ (("p" | "P") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ ("f" | "h")?)?)
-  | ("0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT+ ~ ("p" | "P") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ ("f" | "h")?)
+    ("0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT* ~ "." ~ ASCII_HEX_DIGIT+ ~ (("p" | "P") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ FLOAT_LITERAL_SUFFIX?)?)
+  | ("0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT+ ~ "." ~ ASCII_HEX_DIGIT* ~ (("p" | "P") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ FLOAT_LITERAL_SUFFIX?)?)
+  | ("0" ~ ("x" | "X") ~ ASCII_HEX_DIGIT+ ~ ("p" | "P") ~ ("+" | "-")? ~ ASCII_DIGIT+ ~ FLOAT_LITERAL_SUFFIX?)
 }
 FLOAT_LITERAL         = @{ DECIMAL_FLOAT_LITERAL | HEX_FLOAT_LITERAL }
 
@@ -36,14 +38,10 @@ IDENT_PATTERN_TOKEN = @{
 }
 IDENT               =  { IDENT_PATTERN_TOKEN }
 
-TEMPLATE_ARGS_START     = @{ "<" }
-TEMPLATE_ARGS_END       = @{ ">" }
-TEMPLATE_ARG_EXPRESSION =  { EXPRESSION }
-TEMPLATE_ARG_COMMA_LIST =  {
-    TEMPLATE_ARG_EXPRESSION ~ ("," ~ TEMPLATE_ARG_EXPRESSION)* ~ ","?
-}
-TEMPLATE_LIST           =  {
-    TEMPLATE_ARGS_START ~ TEMPLATE_ARG_COMMA_LIST ~ TEMPLATE_ARGS_END
+TEMPLATE_ARG_EXPRESSION = { EXPRESSION }
+TEMPLATE_LIST           = {
+    // MODIFICATION FROM WGSL - template lists may be empty
+    "<" ~ (TEMPLATE_ARG_EXPRESSION ~ ("," ~ TEMPLATE_ARG_EXPRESSION)* ~ ","?)? ~ ">"
 }
 
 ATTRIBUTE_INNER = {
@@ -120,7 +118,7 @@ GLOBAL_VALUE_DECL           =  {
 }
 
 CALL_PHRASE         = {
-    TEMPLATE_ELABORATED_IDENT ~ ARGUMENT_EXPRESSION_LIST
+    TEMPLATE_ELABORATED_IDENT ~ "(" ~ (EXPRESSION ~ ("," ~ EXPRESSION)* ~ ","?)? ~ ")"
 }
 CALL_EXPRESSION     = {
     CALL_PHRASE
@@ -138,26 +136,21 @@ PRIMARY_EXPRESSION = {
   | PAREN_EXPRESSION
 }
 
-ARGUMENT_EXPRESSION_LIST = {
-    "(" ~ EXPRESSION_COMMA_LIST? ~ ")"
-}
-EXPRESSION_COMMA_LIST    = {
-    EXPRESSION ~ ("," ~ EXPRESSION)* ~ ","?
-}
-RGBA_SWIZZLE_NAME        = { "r" | "g" | "b" | "a" }
-XYZW_SWIZZLE_NAME        = { "x" | "y" | "z" | "w" }
-SWIZZLE_NAME             = {
+RGBA_SWIZZLE_NAME = { "r" | "g" | "b" | "a" }
+XYZW_SWIZZLE_NAME = { "x" | "y" | "z" | "w" }
+SWIZZLE_NAME      = {
     (RGBA_SWIZZLE_NAME ~ (RGBA_SWIZZLE_NAME ~ (RGBA_SWIZZLE_NAME ~ RGBA_SWIZZLE_NAME?)?)?)
   | (XYZW_SWIZZLE_NAME ~ (XYZW_SWIZZLE_NAME ~ (XYZW_SWIZZLE_NAME ~ XYZW_SWIZZLE_NAME?)?)?)
 }
 
+INDEX_EXPRESSION               = { "[" ~ EXPRESSION ~ "]" }
 COMPONENT_OR_SWIZZLE_SPECIFIER = {
-    ("[" ~ EXPRESSION ~ "]" ~ COMPONENT_OR_SWIZZLE_SPECIFIER?)
-  | ("." ~ MEMBER_IDENT ~ COMPONENT_OR_SWIZZLE_SPECIFIER?)
-  | ("." ~ SWIZZLE_NAME ~ COMPONENT_OR_SWIZZLE_SPECIFIER?)
+    (INDEX_EXPRESSION)
+  | ("." ~ SWIZZLE_NAME)
+  | ("." ~ MEMBER_IDENT)
 }
 SINGULAR_EXPRESSION            = {
-    PRIMARY_EXPRESSION ~ COMPONENT_OR_SWIZZLE_SPECIFIER?
+    PRIMARY_EXPRESSION ~ COMPONENT_OR_SWIZZLE_SPECIFIER*
 }
 _PLUS                          = { "+" }
 _HYPHEN                        = { "-" }
@@ -181,7 +174,7 @@ CORE_LHS_EXPRESSION            = {
   | ("(" ~ LHS_EXPRESSION ~ ")")
 }
 LHS_EXPRESSION                 = {
-    (CORE_LHS_EXPRESSION ~ COMPONENT_OR_SWIZZLE_SPECIFIER?)
+    (CORE_LHS_EXPRESSION ~ COMPONENT_OR_SWIZZLE_SPECIFIER*)
   | (_ASTERISK ~ LHS_EXPRESSION)
   | (_AMPERSAND ~ LHS_EXPRESSION)
 }
@@ -230,20 +223,9 @@ _DOUBLE_OR                     = { "||" }
 SHORT_CIRCUIT_OR_EXPRESSION    = {
     RELATIONAL_EXPRESSION ~ (_DOUBLE_OR ~ RELATIONAL_EXPRESSION)*
 }
-BINARY_AND_EXPRESSION          = {
-    UNARY_EXPRESSION ~ (_AMPERSAND ~ UNARY_EXPRESSION)*
-}
-BINARY_OR_EXPRESSION           = {
-    UNARY_EXPRESSION ~ (_PIPE ~ UNARY_EXPRESSION)*
-}
 _UPTICK                        = { "^" }
-BINARY_XOR_EXPRESSION          = {
-    UNARY_EXPRESSION ~ (_UPTICK ~ UNARY_EXPRESSION)*
-}
 BITWISE_EXPRESSION             = {
-    (BINARY_AND_EXPRESSION ~ _AMPERSAND ~ UNARY_EXPRESSION)
-  | (BINARY_OR_EXPRESSION ~ _PIPE ~ UNARY_EXPRESSION)
-  | (BINARY_XOR_EXPRESSION ~ _UPTICK ~ UNARY_EXPRESSION)
+    UNARY_EXPRESSION ~ ((_AMPERSAND ~ UNARY_EXPRESSION)+ | (_PIPE ~ UNARY_EXPRESSION)+ | (_UPTICK ~ UNARY_EXPRESSION)+)
 }
 SHORT_CIRCUIT_EXPRESSION       = {
     (SHORT_CIRCUIT_OR_EXPRESSION ~ _DOUBLE_OR ~ RELATIONAL_EXPRESSION)

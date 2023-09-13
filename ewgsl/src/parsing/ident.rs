@@ -1,3 +1,12 @@
+use perfect_derive::perfect_derive;
+
+use crate::{
+    arena::Handle,
+    spans::{self, Span, Spanned, WithSpan},
+};
+
+use super::expression::Expression;
+
 const KEYWORDS: [&'static str; 26] = [
     "alias",
     "break",
@@ -184,6 +193,7 @@ pub fn is_reserved_word(kwd: &str) -> bool {
 }
 
 /// One of many reasons that a string might not be an identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InvalidIdentifierReason {
     WasSingleUnderscore,
     StartedWithDoubleUnderscore,
@@ -191,19 +201,63 @@ pub enum InvalidIdentifierReason {
     WasReservedWord,
 }
 
-pub fn check_valid_identifier(ident: &str) -> Result<(), InvalidIdentifierReason> {
-    if ident == "_" {
-        return Err(InvalidIdentifierReason::WasSingleUnderscore);
-    }
-    if ident.starts_with("__") {
-        return Err(InvalidIdentifierReason::StartedWithDoubleUnderscore);
-    }
-    if is_keyword(ident) {
-        return Err(InvalidIdentifierReason::WasKeyword);
-    }
-    if is_reserved_word(ident) {
-        return Err(InvalidIdentifierReason::WasReservedWord);
-    }
+/// Some single word without spaces or punctuation, which isn't a keyword or reserved word,
+/// and which doesn't start with "__".
+#[derive(Debug)]
+pub struct Ident<'a, S: spans::Spanning = spans::WithSpans> {
+    ident: S::Spanned<&'a str>,
+}
 
-    return Ok(());
+impl<'a> Ident<'a> {
+    pub fn try_parse(ident: &'a str, span: Span) -> Result<Self, InvalidIdentifierReason> {
+        if ident == "_" {
+            return Err(InvalidIdentifierReason::WasSingleUnderscore);
+        }
+        if ident.starts_with("__") {
+            return Err(InvalidIdentifierReason::StartedWithDoubleUnderscore);
+        }
+        if is_keyword(ident) {
+            return Err(InvalidIdentifierReason::WasKeyword);
+        }
+        if is_reserved_word(ident) {
+            return Err(InvalidIdentifierReason::WasReservedWord);
+        }
+
+        return Ok(Self {
+            ident: WithSpan { inner: ident, span },
+        });
+    }
+}
+
+impl<'a> Spanned for Ident<'a> {
+    type Spanless = Ident<'a, spans::WithoutSpans>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        Ident {
+            ident: self.ident.erase_spans(),
+        }
+    }
+}
+
+impl<'a> AsRef<str> for Ident<'a> {
+    fn as_ref(&self) -> &str {
+        self.ident.inner
+    }
+}
+
+#[perfect_derive(Debug)]
+pub struct TemplatedIdent<'a, S: spans::Spanning = spans::WithSpans> {
+    pub ident: Ident<'a, S>,
+    pub args: Vec<Handle<Expression<'a, S>>>,
+}
+
+impl<'a> Spanned for TemplatedIdent<'a, spans::WithSpans> {
+    type Spanless = TemplatedIdent<'a, spans::WithoutSpans>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        TemplatedIdent {
+            ident: self.ident.erase_spans(),
+            args: self.args.erase_spans(),
+        }
+    }
 }

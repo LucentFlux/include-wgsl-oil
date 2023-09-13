@@ -9,7 +9,7 @@ use std::{
     ops,
 };
 
-use crate::spans;
+use crate::spans::{self, Spanned};
 
 /// An unique index in the arena array that a handle points to.
 /// The "non-zero" part ensures that an `Option<Handle<T>>` has
@@ -50,6 +50,17 @@ impl<T> Handle<T> {
     /// Convert a `usize` index into a `Handle<T>`, without range checks.
     const unsafe fn from_usize_unchecked(index: usize) -> Self {
         Handle::new(Index::new_unchecked((index + 1) as u32))
+    }
+}
+
+impl<T: Spanned> Spanned for Handle<T> {
+    type Spanless = Handle<T::Spanless>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        Handle {
+            index: self.index,
+            marker: PhantomData,
+        }
     }
 }
 
@@ -144,24 +155,27 @@ impl BadHandleRange {
 /// Adding new items to the arena produces a strongly-typed [`Handle`].
 /// The arena can be indexed using the given handle to obtain
 /// a reference to the stored item.
-pub struct Arena<T: Debug + Clone + Hash + Eq, S: spans::SpanPair = spans::WithSpans> {
+pub struct Arena<T, S: spans::Spanning = spans::WithSpans> {
     /// Values of this arena.
     data: Vec<S::Spanned<T>>,
 }
 
-impl<T: Debug + Clone + Hash + Eq, S: spans::SpanPair> Default for Arena<T, S> {
+impl<T, S: spans::Spanning> Default for Arena<T, S> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Debug + Clone + Hash + Eq, S: spans::SpanPair> fmt::Debug for Arena<T, S> {
+impl<T, S: spans::Spanning> fmt::Debug for Arena<T, S>
+where
+    S::Spanned<T>: Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<T: Debug + Clone + Hash + Eq, S: spans::SpanPair> Arena<T, S> {
+impl<T, S: spans::Spanning> Arena<T, S> {
     /// Create a new arena with no initial capacity allocated.
     pub const fn new() -> Self {
         Arena { data: Vec::new() }
@@ -224,9 +238,20 @@ impl<T: Debug + Clone + Hash + Eq, S: spans::SpanPair> Arena<T, S> {
     pub fn contains_handle(&self, handle: Handle<T>) -> bool {
         return handle.index() < self.data.len();
     }
+
+    /// Maps this arena to a new one, where each handle for this one is still valid for the new one, and where the spans are unchanged.
+    pub fn map<U>(&self, f: impl FnMut(T) -> U) -> Arena<U, S> {
+        Arena {
+            data: self
+                .data
+                .into_iter()
+                .map(|v| S::map_spanned(v, f))
+                .collect(),
+        }
+    }
 }
 
-impl<T: Debug + Clone + Hash + Eq> Arena<T, spans::WithSpans> {
+impl<T> Arena<T, spans::WithSpans> {
     /// Remove all of the span information from this module. Useful when testing semantic equivalence
     /// of two modules. See [`crate::parsing::ParsedModule::erase_spans`]
     pub fn erase_spans(self) -> Arena<T, spans::WithoutSpans> {
@@ -236,20 +261,20 @@ impl<T: Debug + Clone + Hash + Eq> Arena<T, spans::WithSpans> {
     }
 }
 
-impl<T: Debug + Clone + Hash + Eq, S: spans::SpanPair> ops::Index<Handle<T>> for Arena<T, S> {
+impl<T, S: spans::Spanning> ops::Index<Handle<T>> for Arena<T, S> {
     type Output = S::Spanned<T>;
     fn index(&self, handle: Handle<T>) -> &S::Spanned<T> {
         &self.data[handle.index()]
     }
 }
 
-impl<T: Debug + Clone + Hash + Eq, S: spans::SpanPair> ops::IndexMut<Handle<T>> for Arena<T, S> {
+impl<T, S: spans::Spanning> ops::IndexMut<Handle<T>> for Arena<T, S> {
     fn index_mut(&mut self, handle: Handle<T>) -> &mut S::Spanned<T> {
         &mut self.data[handle.index()]
     }
 }
 
-impl<T: Debug + Clone + Hash + Eq, S: spans::SpanPair> ops::Index<HandleRange<T>> for Arena<T, S> {
+impl<T, S: spans::Spanning> ops::Index<HandleRange<T>> for Arena<T, S> {
     type Output = [S::Spanned<T>];
     fn index(&self, range: HandleRange<T>) -> &[S::Spanned<T>] {
         &self.data[range.start.index()..range.end.index()]

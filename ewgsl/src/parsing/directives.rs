@@ -1,7 +1,7 @@
 use std::{collections::HashSet, str::FromStr};
 use strum::VariantNames;
 
-use crate::join_into_readable_list;
+use crate::{join_into_readable_list, spans::Spanned};
 
 use super::spans;
 
@@ -139,13 +139,13 @@ impl SoftwareExtensionName {
 
 /// A set of directives, occuring before definitions in a module.
 #[derive(Debug, Clone, Hash)]
-pub struct Directives<S: spans::SpanPair = spans::WithSpans> {
-    pub diagnostics: Vec<<S as spans::SpanPair>::Spanned<SeverityControlName>>,
-    pub enable_extensions: Vec<<S as spans::SpanPair>::Spanned<EnableExtensionName>>,
-    pub software_extensions: Vec<<S as spans::SpanPair>::Spanned<SoftwareExtensionName>>,
+pub struct Directives<S: spans::Spanning = spans::WithSpans> {
+    pub diagnostics: Vec<S::Spanned<SeverityControlName>>,
+    pub enable_extensions: Vec<S::Spanned<EnableExtensionName>>,
+    pub software_extensions: Vec<S::Spanned<SoftwareExtensionName>>,
 }
 
-impl<S: spans::SpanPair> Directives<S> {
+impl<S: spans::Spanning> Directives<S> {
     pub fn empty() -> Self {
         Self {
             diagnostics: vec![],
@@ -170,39 +170,37 @@ impl Directives<spans::WithSpans> {
     /// ```
     pub fn erase_spans(self) -> Directives<spans::WithoutSpans> {
         Directives {
-            diagnostics: self
-                .diagnostics
-                .into_iter()
-                .map(spans::WithSpan::erase_span)
-                .collect(),
-            enable_extensions: self
-                .enable_extensions
-                .into_iter()
-                .map(spans::WithSpan::erase_span)
-                .collect(),
-            software_extensions: self
-                .software_extensions
-                .into_iter()
-                .map(spans::WithSpan::erase_span)
-                .collect(),
+            diagnostics: self.diagnostics.erase_spans(),
+            enable_extensions: self.enable_extensions.erase_spans(),
+            software_extensions: self.software_extensions.erase_spans(),
         }
     }
 }
 
-impl<S: spans::SpanPair> PartialEq for Directives<S> {
+impl<S: spans::Spanning> PartialEq for Directives<S>
+where
+    S::Spanned<SeverityControlName>: std::hash::Hash + Eq,
+    S::Spanned<EnableExtensionName>: std::hash::Hash + Eq,
+    S::Spanned<SoftwareExtensionName>: std::hash::Hash + Eq,
+{
     fn eq(&self, other: &Self) -> bool {
-        fn vecs_contain_same<T: Clone + std::hash::Hash + Eq>(v1: &Vec<T>, v2: &Vec<T>) -> bool {
-            v1.clone().into_iter().collect::<HashSet<_>>()
-                == v2.clone().into_iter().collect::<HashSet<_>>()
+        fn vecs_contain_same<T: std::hash::Hash + Eq>(v1: &Vec<T>, v2: &Vec<T>) -> bool {
+            v1.iter().collect::<HashSet<_>>() == v2.iter().collect::<HashSet<_>>()
         }
         vecs_contain_same(&self.diagnostics, &other.diagnostics)
             && vecs_contain_same(&self.enable_extensions, &other.enable_extensions)
             && vecs_contain_same(&self.software_extensions, &other.software_extensions)
     }
 }
-impl<S: spans::SpanPair> Eq for Directives<S> {}
+impl<S: spans::Spanning> Eq for Directives<S>
+where
+    S::Spanned<SeverityControlName>: std::hash::Hash + Eq,
+    S::Spanned<EnableExtensionName>: std::hash::Hash + Eq,
+    S::Spanned<SoftwareExtensionName>: std::hash::Hash + Eq,
+{
+}
 
-impl<S: spans::SpanPair> Default for Directives<S> {
+impl<S: spans::Spanning> Default for Directives<S> {
     fn default() -> Self {
         Self::empty()
     }

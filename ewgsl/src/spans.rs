@@ -53,8 +53,10 @@ pub struct WithSpan<T> {
     pub span: Span,
 }
 
-impl<T> WithSpan<T> {
-    pub fn erase_span(self) -> T {
+impl<T> Spanned for WithSpan<T> {
+    type Spanless = T;
+
+    fn erase_spans(self) -> Self::Spanless {
         self.inner
     }
 }
@@ -72,20 +74,68 @@ impl<T> AsMut<T> for WithSpan<T> {
 }
 
 /// Marker type denoting that this object carries span information with its children.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug)]
 pub struct WithSpans(());
 /// Marker type denoting that this object does not carry span information with its children.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug)]
 pub struct WithoutSpans(());
 
-pub trait SpanPair {
-    type Spanned<T: Debug + Clone + Hash + Eq>: Debug + Clone + Hash + Eq;
+mod sealed {
+    use super::*;
+    pub trait SpanPairSealed {}
+    impl SpanPairSealed for WithSpans {}
+    impl SpanPairSealed for WithoutSpans {}
 }
 
-impl SpanPair for WithSpans {
-    type Spanned<T: Debug + Clone + Hash + Eq> = WithSpan<T>;
+/// Represents that either the object has span information (using the [`WithSpans`] marker type), or that it does not
+/// (using the [`WithoutSpans`] marker type).
+pub trait Spanning: sealed::SpanPairSealed + Debug {
+    type Spanned<T>;
+    type Span;
+
+    /// Maps a spanned object, preserving any span information.
+    fn map_spanned<T, U>(v: Self::Spanned<T>, f: impl FnOnce(T) -> U) -> Self::Spanned<U>;
+    fn get_span<T>(v: &Self::Spanned<T>) -> Self::Span;
 }
 
-impl SpanPair for WithoutSpans {
-    type Spanned<T: Debug + Clone + Hash + Eq> = T;
+impl Spanning for WithSpans {
+    type Spanned<T> = WithSpan<T>;
+    type Span = Span;
+
+    fn map_spanned<T, U>(v: Self::Spanned<T>, f: impl FnOnce(T) -> U) -> Self::Spanned<U> {
+        WithSpan {
+            span: v.span,
+            inner: f(v.inner),
+        }
+    }
+    fn get_span<T>(v: &Self::Spanned<T>) -> Self::Span {
+        v.span
+    }
+}
+
+impl Spanning for WithoutSpans {
+    type Spanned<T> = T;
+    type Span = ();
+
+    fn map_spanned<T, U>(v: Self::Spanned<T>, f: impl FnOnce(T) -> U) -> Self::Spanned<U> {
+        f(v)
+    }
+    fn get_span<T>(_: &Self::Spanned<T>) -> Self::Span {
+        ()
+    }
+}
+
+/// Indicates that an object has span information that can be stripped.
+pub trait Spanned {
+    type Spanless;
+
+    fn erase_spans(self) -> Self::Spanless;
+}
+
+impl<T: Spanned> Spanned for Vec<T> {
+    type Spanless = Vec<T::Spanless>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        self.into_iter().map(T::erase_spans).collect()
+    }
 }

@@ -5,7 +5,7 @@ pub mod ident;
 
 use crate::{
     arena::{self, Arena, Handle, HandleRange},
-    spans::{self, WithSpan},
+    spans::{self, Spanned, WithSpan},
 };
 
 use std::{
@@ -21,10 +21,15 @@ use codespan_reporting::{
         termcolor::{ColorChoice, NoColor, StandardStream},
     },
 };
+use perfect_derive::perfect_derive;
 use pest::{iterators::Pair, Parser};
 use thiserror::Error;
 
-use self::attributes::{Attribute, AttributeIdentifier};
+use self::{
+    attributes::{Attribute, AttributeIdentifier},
+    expression::Expression,
+    ident::{Ident, TemplatedIdent},
+};
 
 mod parser {
     use pest_derive::Parser;
@@ -55,10 +60,7 @@ impl Display for parser::Rule {
             parser::Rule::CONTINUE => "continue",
             parser::Rule::IDENT_PATTERN_TOKEN => "identifier pattern token",
             parser::Rule::IDENT => "identifier",
-            parser::Rule::TEMPLATE_ARGS_START => "template args start",
-            parser::Rule::TEMPLATE_ARGS_END => "template args end",
             parser::Rule::TEMPLATE_ARG_EXPRESSION => "template arg expression",
-            parser::Rule::TEMPLATE_ARG_COMMA_LIST => "template arg comma list",
             parser::Rule::TEMPLATE_LIST => "template list",
             parser::Rule::ATTRIBUTE_INNER => "attribute inner",
             parser::Rule::ATTRIBUTE => "attribute",
@@ -91,8 +93,6 @@ impl Display for parser::Rule {
             parser::Rule::FUNC_CALL_STATEMENT => "func call statement",
             parser::Rule::PAREN_EXPRESSION => "paren expression",
             parser::Rule::PRIMARY_EXPRESSION => "primary expression",
-            parser::Rule::ARGUMENT_EXPRESSION_LIST => "argument expression list",
-            parser::Rule::EXPRESSION_COMMA_LIST => "expression comma list",
             parser::Rule::RGBA_SWIZZLE_NAME => "rgba swizzle name",
             parser::Rule::XYZW_SWIZZLE_NAME => "xyzw swizzle name",
             parser::Rule::SWIZZLE_NAME => "swizzle name",
@@ -115,9 +115,6 @@ impl Display for parser::Rule {
             parser::Rule::RELATIONAL_EXPRESSION => "relational expression",
             parser::Rule::SHORT_CIRCUIT_AND_EXPRESSION => "short circuit and expression",
             parser::Rule::SHORT_CIRCUIT_OR_EXPRESSION => "short circuit or expression",
-            parser::Rule::BINARY_OR_EXPRESSION => "binary or expression",
-            parser::Rule::BINARY_AND_EXPRESSION => "binary and expression",
-            parser::Rule::BINARY_XOR_EXPRESSION => "binary xor expression",
             parser::Rule::BITWISE_EXPRESSION => "bitwise expression",
             parser::Rule::EXPRESSION => "expression",
             parser::Rule::COMPOUND_STATEMENT => "compound statement",
@@ -191,6 +188,9 @@ impl Display for parser::Rule {
             parser::Rule::RETURN_KEYWORD => "`return` keyword",
             parser::Rule::CONST_ASSERT_KEYWORD => "`const_assert` keyword",
             parser::Rule::FUNCTION_KEYWORD => "`fn` keyword",
+            parser::Rule::INT_LITERAL_SUFFIX => "int literal suffix - `u` or `i`",
+            parser::Rule::FLOAT_LITERAL_SUFFIX => "float literal suffix - `h` or `f`",
+            parser::Rule::INDEX_EXPRESSION => "indexing expression",
         };
         write!(f, "{}", name)
     }
@@ -264,6 +264,10 @@ pub enum ParseIssue<'a> {
         minimum: usize,
         found: usize,
     },
+    InvalidIdentifier {
+        inner: ident::InvalidIdentifierReason,
+        found: &'a str,
+    },
 }
 
 impl<'a> Display for ParseIssue<'a> {
@@ -328,6 +332,26 @@ impl<'a> Display for ParseIssue<'a> {
                     )
                 }
             }
+            ParseIssue::InvalidIdentifier { inner, found } => match inner {
+                ident::InvalidIdentifierReason::WasSingleUnderscore => {
+                    write!(f, "`_` is not a valid identifier in this context")
+                }
+                ident::InvalidIdentifierReason::StartedWithDoubleUnderscore => {
+                    write!(f, "identifiers may not start with `__`")
+                }
+                ident::InvalidIdentifierReason::WasKeyword => {
+                    write!(
+                        f,
+                        "{found} is a keyword and so cannot be used as an identifier"
+                    )
+                }
+                ident::InvalidIdentifierReason::WasReservedWord => {
+                    write!(
+                        f,
+                        "{found} is a reserved word and so cannot be used as an identifier"
+                    )
+                }
+            },
         }
     }
 }
@@ -394,7 +418,7 @@ pub struct ParseError<'a> {
     pub issues: NonEmptyVec<spans::WithSpan<ParseIssue<'a>>>,
     /// The module that was able to be parsed. This is useful to extract definitions from to help debug errors in
     /// modules that import this one.
-    pub partial_module: ParsedModule,
+    pub partial_module: ParsedModule<'a>,
     /// The self-reported file name used when parsing the file
     pub file_name: &'a str,
     /// The sourcecode used when trying to parse the module.
@@ -499,27 +523,29 @@ impl<'a> Display for ErrorDiagnostics<'a> {
     }
 }
 
-pub type ParseResult<'a> = Result<ParsedModule, ParseError<'a>>;
+pub type ParseResult<'a> = Result<ParsedModule<'a>, ParseError<'a>>;
 
 /// A single module (source file), many of which can be unified into a shader.
-#[derive(Debug)]
-pub struct ParsedModule<S: spans::SpanPair = spans::WithSpans> {
+#[perfect_derive(Debug)]
+pub struct ParsedModule<'a, S: spans::Spanning = spans::WithSpans> {
     pub directives: directives::Directives<S>,
-    pub attributes: Arena<Attribute, S>,
+    pub attributes: Arena<Attribute<'a>, S>,
+    pub expressions: Arena<Expression<'a, S>, S>,
 }
 
-impl<S: spans::SpanPair> ParsedModule<S> {
+impl<'a, S: spans::Spanning> ParsedModule<'a, S> {
     /// A module with no content. Equal to `ParsedModule::parse("")`.
     pub fn empty() -> Self {
         Self {
             directives: directives::Directives::empty(),
             attributes: Arena::new(),
+            expressions: Arena::new(),
         }
     }
 }
 
-impl ParsedModule<spans::WithSpans> {
-    pub fn parse<'a>(file_name: &'a str, source_code: &'a str) -> ParseResult<'a> {
+impl<'a> ParsedModule<'a, spans::WithSpans> {
+    pub fn parse(file_name: &'a str, source_code: &'a str) -> ParseResult<'a> {
         // Lex and process errors
         let parse_res = parser::EwgslParser::parse(parser::Rule::TRANSLATION_UNIT, source_code);
         let mut translation_units = match parse_res {
@@ -569,12 +595,12 @@ impl ParsedModule<spans::WithSpans> {
     }
 
     // A translation unit is the root object. This method takes a parsed root and maps it into our module arenas object.
-    fn parse_translation_unit<'a>(
+    fn parse_translation_unit(
         translation_unit: Pair<'_, parser::Rule>,
         file_name: &'a str,
         source_code: &'a str,
     ) -> ParseResult<'a> {
-        assert_eq!(translation_unit.as_rule(), parser::Rule::TRANSLATION_UNIT);
+        debug_assert_eq!(translation_unit.as_rule(), parser::Rule::TRANSLATION_UNIT);
 
         let mut module = ParsedModule::empty();
 
@@ -628,7 +654,7 @@ impl ParsedModule<spans::WithSpans> {
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         global_directive: Pair<'_, parser::Rule>,
     ) {
-        assert_eq!(global_directive.as_rule(), parser::Rule::GLOBAL_DIRECTIVE);
+        debug_assert_eq!(global_directive.as_rule(), parser::Rule::GLOBAL_DIRECTIVE);
 
         let mut rules = global_directive.into_inner();
         let inner_directive = rules.next().expect("global directive is a switch type");
@@ -643,7 +669,7 @@ impl ParsedModule<spans::WithSpans> {
                     .skip(1) // Skip the keyword
                     .next()
                     .expect("diagnostics have names");
-                assert_eq!(name.as_rule(), parser::Rule::IDENT);
+                debug_assert_eq!(name.as_rule(), parser::Rule::IDENT);
 
                 let severity = match directives::SeverityControlName::parse(name.as_str()) {
                     Some(severity) => severity,
@@ -670,10 +696,10 @@ impl ParsedModule<spans::WithSpans> {
                     .skip(1) // Skip the keyword
                     .next()
                     .unwrap();
-                assert_eq!(names.as_rule(), parser::Rule::ENABLE_EXTENSION_LIST);
+                debug_assert_eq!(names.as_rule(), parser::Rule::ENABLE_EXTENSION_LIST);
 
                 for name in names.into_inner() {
-                    assert_eq!(name.as_rule(), parser::Rule::ENABLE_EXTENSION_NAME);
+                    debug_assert_eq!(name.as_rule(), parser::Rule::ENABLE_EXTENSION_NAME);
 
                     let extension = match directives::EnableExtensionName::parse(name.as_str()) {
                         Some(extension) => extension,
@@ -701,10 +727,10 @@ impl ParsedModule<spans::WithSpans> {
                     .skip(1) // Skip the keyword
                     .next()
                     .unwrap();
-                assert_eq!(names.as_rule(), parser::Rule::SOFTWARE_EXTENSION_LIST);
+                debug_assert_eq!(names.as_rule(), parser::Rule::SOFTWARE_EXTENSION_LIST);
 
                 for name in names.into_inner() {
-                    assert_eq!(name.as_rule(), parser::Rule::SOFTWARE_EXTENSION_NAME);
+                    debug_assert_eq!(name.as_rule(), parser::Rule::SOFTWARE_EXTENSION_NAME);
 
                     let extension = match directives::SoftwareExtensionName::parse(name.as_str()) {
                         Some(extension) => extension,
@@ -735,7 +761,7 @@ impl ParsedModule<spans::WithSpans> {
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         global_decl: Pair<'_, parser::Rule>,
     ) {
-        assert_eq!(global_decl.as_rule(), parser::Rule::GLOBAL_DECL);
+        debug_assert_eq!(global_decl.as_rule(), parser::Rule::GLOBAL_DECL);
 
         // Declarations can be empty
         if global_decl.as_str() == ";" {
@@ -769,50 +795,333 @@ impl ParsedModule<spans::WithSpans> {
         }
     }
 
-    fn parse_bitwise_expression<'a>(
+    // An identifier. Just some characters without any templating or anything else.
+    fn parse_ident(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        ident: Pair<'a, parser::Rule>,
+    ) -> Option<Ident<'a>> {
+        debug_assert_eq!(ident.as_rule(), parser::Rule::IDENT);
+        let span = ident.as_span().into();
+
+        let res = Ident::try_parse(ident.as_str(), span);
+        if let Err(e) = res {
+            issues.push(WithSpan {
+                inner: ParseIssue::InvalidIdentifier {
+                    inner: e,
+                    found: ident.as_str(),
+                },
+                span,
+            });
+            return None;
+        }
+
+        return res.ok();
+    }
+
+    // An identifier. Just some characters without any templating or anything else.
+    fn parse_template_list(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        template_list: Pair<'a, parser::Rule>,
+    ) -> Option<Vec<Handle<Expression<'a>>>> {
+        debug_assert_eq!(template_list.as_rule(), parser::Rule::TEMPLATE_LIST);
+    }
+
+    // An identifier possibly followed by some <template, args>
+    fn parse_templated_ident(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        ident: Pair<'a, parser::Rule>,
+    ) -> Option<TemplatedIdent<'a>> {
+        debug_assert_eq!(ident.as_rule(), parser::Rule::TEMPLATE_ELABORATED_IDENT);
+
+        let mut inner = ident.into_inner();
+
+        // First the identifier
+        let ident = inner.next().unwrap();
+        let ident = Self::parse_ident(module, issues, ident)?;
+
+        // Then, optionally, the template args
+        let args = if let Some(template_list) = inner.next() {
+            Self::parse_template_list(module, issues, template_list)?
+        } else {
+            vec![]
+        };
+
+        return Some(TemplatedIdent { ident, args });
+    }
+
+    // Something of the form `foo<a, b>(x, y)`
+    fn parse_call_prase_expression(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        call_phrase: Pair<'a, parser::Rule>,
+    ) -> Option<expression::CallPhrase<'a>> {
+        debug_assert_eq!(call_phrase.as_rule(), parser::Rule::CALL_PHRASE);
+
+        let mut inner = call_phrase.into_inner();
+
+        // First the identifier
+        let ident = inner.next().unwrap();
+        let ident = Self::parse_templated_ident(module, issues, ident)?;
+
+        // Then any number of arguments
+        // Try to parse them all still, even when one errors.
+        let mut args = vec![];
+        for arg in inner {
+            let arg = Self::parse_expression(module, issues, arg);
+            args.push(arg);
+        }
+        let args = args.into_iter().collect::<Option<Vec<_>>>()?;
+
+        return Some(expression::CallPhrase { ident, args });
+    }
+
+    fn parse_primary_expression(
         module: &mut ParsedModule,
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Option<Handle<Expression>> {
-        assert_eq!(expression.as_rule(), parser::Rule::BITWISE_EXPRESSION);
+    ) -> Option<Handle<Expression<'a>>> {
+        debug_assert_eq!(expression.as_rule(), parser::Rule::PRIMARY_EXPRESSION);
+        let expression_span = expression.as_span().into();
 
-        let inner = expression
-            .into_inner();
-        let lhs = inner.next().expect("every bitwise expr is a ")
-        match inner_rule.as_rule() {
-            parser::Rule:: => {
-                Self::parse_bitwise_expression(module, issues, inner_rule)
+        let inner = expression.into_inner().next().unwrap();
+        let expression = match inner.as_rule() {
+            parser::Rule::TEMPLATE_ELABORATED_IDENT => {
+                let ident = Self::parse_templated_ident(module, issues, inner)?;
+
+                Expression::Identifier { ident }
             }
-            parser::Rule::SHORT_CIRCUIT_EXPRESSION => {
-                Self::parse_short_circuit_expression(module, issues, inner_rule)
+            parser::Rule::CALL_EXPRESSION => {
+                let call_phrase = Self::parse_call_prase_expression(module, issues, inner)?;
+
+                Expression::Call(call_phrase)
             }
-            parser::Rule::RELATIONAL_EXPRESSION => {
-                Self::parse_relational_expression(module, issues, inner_rule)
+            parser::Rule::LITERAL => {
+                let literal = inner.into_inner().next().unwrap();
+                let literal = match literal.as_rule() {
+                    parser::Rule::INT_LITERAL => expression::Literal::Int(literal.as_str()),
+                    parser::Rule::FLOAT_LITERAL => expression::Literal::Float(literal.as_str()),
+                    parser::Rule::BOOLEAN_LITERAL => {
+                        expression::Literal::Boolean(literal.as_str() == "true")
+                    }
+                    _ => unreachable!(),
+                };
+
+                Expression::Literal { value: literal }
+            }
+            parser::Rule::PAREN_EXPRESSION => {
+                let inner_expr = inner.into_inner().next().unwrap();
+                return Self::parse_expression(module, issues, inner_expr);
             }
             _ => unreachable!(),
+        };
+
+        let handle = module.expressions.append(WithSpan {
+            span: expression_span,
+            inner: expression,
+        });
+        return Some(handle);
+    }
+
+    // Accessors are swizzles, members or index expressions, and can be stacked on top of an expression.
+    fn parse_accessor_on_expression(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        accessor: Pair<'a, parser::Rule>,
+        base_expression: Handle<Expression>,
+        composed_span: spans::Span,
+    ) -> Option<Handle<Expression<'a>>> {
+        assert_eq!(
+            accessor.as_rule(),
+            parser::Rule::COMPONENT_OR_SWIZZLE_SPECIFIER
+        );
+        let accessor_span = accessor.as_span().into();
+
+        let inner = accessor.into_inner().next().unwrap();
+        let accessed = match inner.as_rule() {
+            parser::Rule::INDEX_EXPRESSION => {
+                let index_expression = inner.into_inner().next().unwrap();
+                let index_expression = Self::parse_expression(module, issues, index_expression)?;
+                Expression::Index {
+                    base: base_expression,
+                    index: WithSpan {
+                        span: accessor_span,
+                        inner: index_expression,
+                    },
+                }
+            }
+            parser::Rule::SWIZZLE_NAME => {
+                let swizzle = expression::Swizzle::try_parse(inner.as_str())
+                    .expect("swizzle pattern only matches valid swizzles");
+                Expression::Swizzle {
+                    base: base_expression,
+                    swizzle: WithSpan {
+                        span: accessor_span,
+                        inner: swizzle,
+                    },
+                }
+            }
+            parser::Rule::MEMBER_IDENT => {
+                let member_ident = inner.as_str();
+                Expression::MemberAccess {
+                    base: base_expression,
+                    member: WithSpan {
+                        span: accessor_span,
+                        inner: member_ident,
+                    },
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        let handle = module.expressions.append(WithSpan {
+            span: composed_span,
+            inner: accessed,
+        });
+
+        return Some(handle);
+    }
+
+    fn parse_singular_expression(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        expression: Pair<'a, parser::Rule>,
+    ) -> Option<Handle<Expression<'a>>> {
+        debug_assert_eq!(expression.as_rule(), parser::Rule::SINGULAR_EXPRESSION);
+
+        let mut inner = expression.into_inner();
+
+        // A primary expression followed by 1 or more accessors
+        let inner_expr = inner.next().unwrap();
+        let mut inner_span: spans::Span = inner_expr.as_span().into();
+        let mut inner_expr = Self::parse_primary_expression(module, issues, expression)?;
+
+        // If we find accessors, hand off to `parse_accessor_on_expression`
+        while let Some(accessor) = inner.next() {
+            inner_span = inner_span.union(accessor.as_span().into());
+            inner_expr = Self::parse_accessor_on_expression(
+                module, issues, accessor, inner_expr, inner_span,
+            )?;
         }
+
+        return Some(inner_expr);
     }
 
-    fn parse_short_circuit_expression<'a>(
+    fn parse_unary_expression(
         module: &mut ParsedModule,
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Option<Handle<Expression>> {
+    ) -> Option<Handle<Expression<'a>>> {
+        debug_assert_eq!(expression.as_rule(), parser::Rule::UNARY_EXPRESSION);
+        let expression_span = expression.as_span().into();
+
+        let mut inner = expression.into_inner();
+
+        // We have either 0 or 1 preceeding unary operators
+        let first = inner.next().unwrap();
+        let op_span = first.as_span().into();
+        let op = match first.as_rule() {
+            parser::Rule::SINGULAR_EXPRESSION => {
+                return Self::parse_singular_expression(module, issues, first)
+            }
+            // Else it will be a unary op
+            parser::Rule::_HYPHEN => expression::UnaryOperator::Minus,
+            parser::Rule::_EXCLAMATION_MARK => expression::UnaryOperator::Not,
+            parser::Rule::_TILDE => expression::UnaryOperator::Invert,
+            parser::Rule::_AMPERSAND => expression::UnaryOperator::Reference,
+            parser::Rule::_ASTERISK => expression::UnaryOperator::Dereference,
+            _ => unreachable!(),
+        };
+        let op = WithSpan {
+            span: op_span,
+            inner: op,
+        };
+
+        // Then the expression - recurse
+        let expression = inner.next().unwrap();
+        assert!(inner.next().is_none());
+        let expr = Self::parse_unary_expression(module, issues, expression)?;
+
+        // Add to module and return
+        let expr = Expression::Unary { op, expr };
+        let expr_handle = module.expressions.append(WithSpan {
+            span: expression_span,
+            inner: expr,
+        });
+        return Some(expr_handle);
     }
 
-    fn parse_relational_expression<'a>(
+    fn parse_bitwise_expression(
         module: &mut ParsedModule,
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Option<Handle<Expression>> {
+    ) -> Option<Handle<Expression<'a>>> {
+        debug_assert_eq!(expression.as_rule(), parser::Rule::BITWISE_EXPRESSION);
+        let expression_span = expression.as_span().into();
+
+        let mut inner = expression.into_inner();
+
+        let lhs = inner.next().unwrap();
+        debug_assert_eq!(lhs.as_rule(), parser::Rule::UNARY_EXPRESSION);
+
+        let op = inner.next().unwrap();
+        let op_span = op.as_span().into();
+        let op = match op.as_rule() {
+            parser::Rule::_AMPERSAND => expression::BinaryOperator::And,
+            parser::Rule::_PIPE => expression::BinaryOperator::Or,
+            parser::Rule::_UPTICK => expression::BinaryOperator::Xor,
+            _ => unreachable!(),
+        };
+        let op = WithSpan {
+            span: op_span,
+            inner: op,
+        };
+
+        let mut rhs_list = vec![];
+        while let Some(rhs) = inner.next() {
+            debug_assert_eq!(rhs.as_rule(), parser::Rule::UNARY_EXPRESSION);
+            rhs_list.push(rhs);
+
+            // Skip next op, if there is one
+            inner.next();
+        }
+
+        let mut lhs = Self::parse_unary_expression(module, issues, lhs)?;
+        for rhs in rhs_list {
+            let rhs = Self::parse_unary_expression(module, issues, rhs)?;
+
+            let lhs_expr = Expression::Binary { lhs, op, rhs };
+            lhs = module.expressions.append(WithSpan {
+                span: expression_span,
+                inner: lhs_expr,
+            });
+        }
+
+        return Some(lhs);
     }
 
-    fn parse_expression<'a>(
+    fn parse_short_circuit_expression(
         module: &mut ParsedModule,
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Option<Handle<Expression>> {
-        assert_eq!(expression.as_rule(), parser::Rule::EXPRESSION);
+    ) -> Option<Handle<Expression<'a>>> {
+    }
+
+    fn parse_relational_expression(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        expression: Pair<'a, parser::Rule>,
+    ) -> Option<Handle<Expression<'a>>> {
+    }
+
+    fn parse_expression(
+        module: &mut ParsedModule,
+        issues: &mut Vec<spans::WithSpan<ParseIssue>>,
+        expression: Pair<'a, parser::Rule>,
+    ) -> Option<Handle<Expression<'a>>> {
+        debug_assert_eq!(expression.as_rule(), parser::Rule::EXPRESSION);
 
         let inner_rule = expression
             .into_inner()
@@ -832,21 +1141,21 @@ impl ParsedModule<spans::WithSpans> {
         }
     }
 
-    fn parse_attributes<'a>(
+    fn parse_attributes(
         module: &mut ParsedModule,
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         attributes: impl IntoIterator<Item = Pair<'a, parser::Rule>>,
-    ) -> HandleRange<Attribute> {
+    ) -> HandleRange<Attribute<'a>> {
         let mut range = None;
         for attribute in attributes {
-            assert_eq!(attribute.as_rule(), parser::Rule::ATTRIBUTE);
+            debug_assert_eq!(attribute.as_rule(), parser::Rule::ATTRIBUTE);
             let attribute_span = attribute.as_span().into();
 
             let attribute_inner = attribute
                 .into_inner()
                 .next()
                 .expect("Rule::ATTRIBUTE has a single inner Rule::ATTRIBUTE_INNER");
-            assert_eq!(attribute_inner.as_rule(), parser::Rule::ATTRIBUTE_INNER);
+            debug_assert_eq!(attribute_inner.as_rule(), parser::Rule::ATTRIBUTE_INNER);
 
             let mut attribute_inner = attribute_inner.into_inner();
 
@@ -854,7 +1163,7 @@ impl ParsedModule<spans::WithSpans> {
             let keyword = attribute_inner
                 .next()
                 .expect("all attributes start with a keyword");
-            assert_eq!(keyword.as_rule(), parser::Rule::IDENT);
+            debug_assert_eq!(keyword.as_rule(), parser::Rule::IDENT);
             let keyword_span = keyword.as_span().into();
             let identifier = match attributes::AttributeIdentifier::parse(keyword.as_str()) {
                 Some(identifier) => WithSpan {
@@ -872,54 +1181,27 @@ impl ParsedModule<spans::WithSpans> {
                 }
             };
 
-            // Extract any arguments (and error if we're given too many)
-            let arg_count = identifier.as_ref().argument_count();
+            // Extract any arguments
             let mut expressions = Vec::new();
             while let Some(expression) = attribute_inner.next() {
-                let max_arg_count = arg_count.end - 1;
-                if expressions.len() >= max_arg_count {
-                    let mut total_expressions_count = expressions.len();
-                    // Too many expressions - eat the rest and error across all of them
-                    let mut remaining_arg_spans: spans::Span = expression.as_span().into();
-                    for bad_expression in attribute_inner {
-                        remaining_arg_spans =
-                            remaining_arg_spans.union(bad_expression.as_span().into());
-                        total_expressions_count += 1;
-                    }
-                    issues.push(spans::WithSpan {
-                        span: remaining_arg_spans,
-                        inner: ParseIssue::ExcessiveAttributeArgumentCount {
-                            attribute_ident: identifier.inner,
-                            maximum: max_arg_count,
-                            found: total_expressions_count,
-                        },
-                    });
-                    break;
-                }
-
                 let expression = Self::parse_expression(module, issues, expression);
                 expressions.push(expression);
             }
-
-            // Check we weren't given too *few* arguments, and validate
-            let min_arg_count = arg_count.start;
-            if expressions.len() < min_arg_count {
-                issues.push(spans::WithSpan {
-                    span: attribute_span,
-                    inner: ParseIssue::InadequateAttributeArgumentCount {
-                        attribute_ident: identifier.inner,
-                        minimum: min_arg_count,
-                        found: expressions.len(),
-                    },
-                });
-            }
-            let attribute = match attributes::Attribute::try_parse_from(identifier, expressions) {
-                Ok(attribute) => attribute,
-                Err(mut attribute_issues) => {
-                    issues.append(&mut attribute_issues);
-                    continue;
-                }
+            let expressions = expressions.into_iter().collect::<Option<Vec<_>>>();
+            let expressions = match expressions {
+                Some(expressions) => expressions,
+                None => continue,
             };
+
+            // build and validate at the same time
+            let attribute =
+                match attributes::Attribute::try_parse_from(&*module, identifier, expressions) {
+                    Ok(attribute) => attribute,
+                    Err(mut attribute_issues) => {
+                        issues.append(&mut attribute_issues);
+                        continue;
+                    }
+                };
 
             // Add to the arena
             let attribute_handle = module.attributes.append(spans::WithSpan {
@@ -956,7 +1238,7 @@ impl ParsedModule<spans::WithSpans> {
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         global_value_decl: Pair<'_, parser::Rule>,
     ) {
-        assert_eq!(global_value_decl.as_rule(), parser::Rule::GLOBAL_VALUE_DECL);
+        debug_assert_eq!(global_value_decl.as_rule(), parser::Rule::GLOBAL_VALUE_DECL);
 
         todo!()
     }
@@ -967,7 +1249,7 @@ impl ParsedModule<spans::WithSpans> {
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         type_alias_decl: Pair<'_, parser::Rule>,
     ) {
-        assert_eq!(type_alias_decl.as_rule(), parser::Rule::TYPE_ALIAS_DECL);
+        debug_assert_eq!(type_alias_decl.as_rule(), parser::Rule::TYPE_ALIAS_DECL);
 
         todo!()
     }
@@ -978,7 +1260,7 @@ impl ParsedModule<spans::WithSpans> {
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         struct_decl: Pair<'_, parser::Rule>,
     ) {
-        assert_eq!(struct_decl.as_rule(), parser::Rule::STRUCT_DECL);
+        debug_assert_eq!(struct_decl.as_rule(), parser::Rule::STRUCT_DECL);
 
         todo!()
     }
@@ -989,7 +1271,7 @@ impl ParsedModule<spans::WithSpans> {
         issues: &mut Vec<spans::WithSpan<ParseIssue>>,
         function_decl: Pair<'_, parser::Rule>,
     ) {
-        assert_eq!(function_decl.as_rule(), parser::Rule::FUNCTION_DECL);
+        debug_assert_eq!(function_decl.as_rule(), parser::Rule::FUNCTION_DECL);
 
         todo!()
     }
@@ -1020,27 +1302,33 @@ impl ParsedModule<spans::WithSpans> {
     /// assert!(mod1 != mod2);
     /// assert!(mod1.erase_spans() == mod2.erase_spans());
     /// ```
-    pub fn erase_spans(self) -> ParsedModule<spans::WithoutSpans> {
+    pub fn erase_spans(self) -> ParsedModule<'a, spans::WithoutSpans> {
         ParsedModule {
             directives: self.directives.erase_spans(),
             attributes: self.attributes.erase_spans(),
+            expressions: self
+                .expressions
+                .erase_spans()
+                .map(|expr| expr.erase_spans()),
         }
     }
 }
 
-impl<S: spans::SpanPair> Default for ParsedModule<S> {
+impl<'a, S: spans::Spanning> Default for ParsedModule<'a, S> {
     fn default() -> Self {
         Self::empty()
     }
 }
 
-impl<S: spans::SpanPair> PartialEq for ParsedModule<S> {
+impl<'a, S: spans::Spanning> PartialEq for ParsedModule<'a, S>
+where
+    directives::Directives<S>: PartialEq,
+{
     fn eq(&self, other: &Self) -> bool {
         return self.directives == other.directives;
     }
 }
-
-impl<S: spans::SpanPair> Eq for ParsedModule<S> {}
+impl<'a, S: spans::Spanning> Eq for ParsedModule<'a, S> where Self: PartialEq {}
 
 #[cfg(test)]
 mod tests {
