@@ -1,17 +1,34 @@
+use std::mem::{discriminant, Discriminant};
+
 use perfect_derive::perfect_derive;
 
 use crate::{
-    arena::Handle,
-    spans::{self, Spanned},
+    arena::{Arena, Handle},
+    spans::{self, MaybeSpanned, Spanned},
 };
 
-use super::ident::TemplatedIdent;
+use super::ident::{Ident, TemplatedIdent};
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum BinaryOperator {
     And,
     Or,
     Xor,
+    LessThanEqual,
+    GreaterThanEqual,
+    LessThan,
+    GreaterThan,
+    EqualTo,
+    NotEqualTo,
+    ShortCircuitAnd,
+    ShortCircuitOr,
+    ShiftLeft,
+    ShiftRight,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -28,7 +45,7 @@ pub enum UnaryOperator {
     Dereference,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Hash, PartialEq, Eq)]
 pub enum Literal<'a> {
     Int(&'a str),
     Float(&'a str),
@@ -125,6 +142,30 @@ pub struct CallPhrase<'a, S: spans::Spanning = spans::WithSpans> {
     pub args: Vec<Handle<Expression<'a, S>>>,
 }
 
+impl<'a, S: spans::Spanning> CallPhrase<'a, S>
+where
+    S::Spanned<Ident<'a>>: PartialEq,
+    S::Spanned<Expression<'a, S>>: PartialEq,
+{
+    // Checks if this call phrase is equal to another, given two (possibly different) arenas of expressions.
+    pub fn eq_in(
+        &self,
+        lhs_arena: &Arena<Expression<'a, S>, S>,
+        rhs: &Self,
+        rhs_arena: &Arena<Expression<'a, S>, S>,
+    ) -> bool {
+        return self.ident.eq_in(lhs_arena, &rhs.ident, rhs_arena)
+            && self.args.len() == rhs.args.len()
+            && self.args.iter().zip(&rhs.args).all(|(lhs, rhs)| {
+                match (lhs_arena.try_get(*lhs), rhs_arena.try_get(*rhs)) {
+                    (Ok(lhs), Ok(rhs)) => lhs == rhs,
+                    (Err(_), Err(_)) => true,
+                    _ => false,
+                }
+            });
+    }
+}
+
 impl<'a> Spanned for CallPhrase<'a> {
     type Spanless = CallPhrase<'a, spans::WithoutSpans>;
 
@@ -156,7 +197,7 @@ pub enum Expression<'a, S: spans::Spanning = spans::WithSpans> {
     },
     Index {
         base: Handle<Expression<'a, S>>,
-        index: S::Spanned<Handle<Expression<'a, S>>>,
+        index: Handle<Expression<'a, S>>,
     },
     Swizzle {
         base: Handle<Expression<'a, S>>,
@@ -166,6 +207,124 @@ pub enum Expression<'a, S: spans::Spanning = spans::WithSpans> {
         base: Handle<Expression<'a, S>>,
         member: S::Spanned<&'a str>,
     },
+    Parenthesized(Handle<Expression<'a, S>>),
+}
+
+impl<'a, S: spans::Spanning> Handle<Expression<'a, S>>
+where
+    // Are all true all of the time, but rust's typechecking currently doesn't know it.
+    S::Spanned<&'a str>: PartialEq,
+    S::Spanned<Ident<'a>>: PartialEq,
+    S::Spanned<UnaryOperator>: PartialEq,
+    S::Spanned<BinaryOperator>: PartialEq,
+    S::Spanned<Swizzle>: PartialEq,
+{
+    pub fn eq_in(
+        &self,
+        lhs_arena: &Arena<Expression<'a, S>, S>,
+        rhs: &Self,
+        rhs_arena: &Arena<Expression<'a, S>, S>,
+    ) -> bool {
+        match (lhs_arena.try_get(*self), rhs_arena.try_get(*rhs)) {
+            (Ok(lhs), Ok(rhs)) => {
+                lhs.span() == rhs.span() && lhs.inner().eq_in(lhs_arena, rhs.inner(), rhs_arena)
+            }
+            (Err(_), Err(_)) => true,
+            _ => false,
+        }
+    }
+}
+
+impl<'a, S: spans::Spanning> Expression<'a, S>
+where
+    S::Spanned<&'a str>: PartialEq,
+    S::Spanned<Ident<'a>>: PartialEq,
+    S::Spanned<UnaryOperator>: PartialEq,
+    S::Spanned<BinaryOperator>: PartialEq,
+    S::Spanned<Swizzle>: PartialEq,
+{
+    // Checks if this expression is equal to another, given two (possibly different) arenas.
+    pub fn eq_in(
+        &self,
+        lhs_arena: &Arena<Expression<'a, S>, S>,
+        rhs: &Self,
+        rhs_arena: &Arena<Expression<'a, S>, S>,
+    ) -> bool {
+        if discriminant(self) != discriminant(rhs) {
+            return false;
+        }
+
+        match (self, rhs) {
+            (Self::Literal { value: lhs }, Self::Literal { value: rhs }) => lhs == rhs,
+            (Self::Identifier { ident: lhs }, Self::Identifier { ident: rhs }) => {
+                lhs.eq_in(lhs_arena, rhs, rhs_arena)
+            }
+            (Self::Call(lhs), Self::Call(rhs)) => lhs.eq_in(lhs_arena, rhs, rhs_arena),
+            (
+                Self::Unary {
+                    op: lhs_op,
+                    expr: lhs_expr,
+                },
+                Self::Unary {
+                    op: rhs_op,
+                    expr: rhs_expr,
+                },
+            ) => lhs_op == rhs_op && lhs_expr.eq_in(lhs_arena, rhs_expr, rhs_arena),
+            (
+                Self::Binary {
+                    lhs: lhs_expr_of_lhs,
+                    op: lhs_op,
+                    rhs: rhs_expr_of_lhs,
+                },
+                Self::Binary {
+                    lhs: lhs_expr_of_rhs,
+                    op: rhs_op,
+                    rhs: rhs_expr_of_rhs,
+                },
+            ) => {
+                lhs_op == rhs_op
+                    && lhs_expr_of_lhs.eq_in(lhs_arena, lhs_expr_of_rhs, rhs_arena)
+                    && rhs_expr_of_lhs.eq_in(lhs_arena, rhs_expr_of_rhs, rhs_arena)
+            }
+            (
+                Self::Index {
+                    base: lhs_base,
+                    index: lhs_index,
+                },
+                Self::Index {
+                    base: rhs_base,
+                    index: rhs_index,
+                },
+            ) => {
+                lhs_base.eq_in(lhs_arena, rhs_base, rhs_arena)
+                    && lhs_index.eq_in(lhs_arena, rhs_index, rhs_arena)
+            }
+            (
+                Self::Swizzle {
+                    base: lhs_base,
+                    swizzle: lhs_swizzle,
+                },
+                Self::Swizzle {
+                    base: rhs_base,
+                    swizzle: rhs_swizzle,
+                },
+            ) => lhs_base.eq_in(lhs_arena, rhs_base, rhs_arena) && lhs_swizzle == rhs_swizzle,
+            (
+                Self::MemberAccess {
+                    base: lhs_base,
+                    member: lhs_member,
+                },
+                Self::MemberAccess {
+                    base: rhs_base,
+                    member: rhs_member,
+                },
+            ) => lhs_member == rhs_member && lhs_base.eq_in(lhs_arena, rhs_base, rhs_arena),
+            (Self::Parenthesized(lhs), Self::Parenthesized(rhs)) => {
+                lhs.eq_in(lhs_arena, rhs, rhs_arena)
+            }
+            _ => unimplemented!(),
+        }
+    }
 }
 
 impl<'a> Spanned for Expression<'a, spans::WithSpans> {
@@ -189,7 +348,7 @@ impl<'a> Spanned for Expression<'a, spans::WithSpans> {
             },
             Expression::Index { base, index } => Expression::Index {
                 base: base.erase_spans(),
-                index: index.erase_spans().erase_spans(),
+                index: index.erase_spans(),
             },
             Expression::Swizzle { base, swizzle } => Expression::Swizzle {
                 base: base.erase_spans(),
@@ -199,12 +358,16 @@ impl<'a> Spanned for Expression<'a, spans::WithSpans> {
                 base: base.erase_spans(),
                 member: member.erase_spans(),
             },
+            Expression::Parenthesized(v) => Expression::Parenthesized(v.erase_spans()),
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
     fn swizzle_parse_1() {
         let swzl = Swizzle::try_parse("xyzw").unwrap();
         assert_eq!(
@@ -220,6 +383,7 @@ mod tests {
             }
         )
     }
+    #[test]
     fn swizzle_parse_2() {
         let swzl = Swizzle::try_parse("rgba").unwrap();
         assert_eq!(
@@ -235,6 +399,7 @@ mod tests {
             }
         )
     }
+    #[test]
     fn swizzle_parse_3() {
         let swzl = Swizzle::try_parse("wxz").unwrap();
         assert_eq!(
@@ -249,6 +414,7 @@ mod tests {
             }
         )
     }
+    #[test]
     fn swizzle_parse_4() {
         let swzl = Swizzle::try_parse("a").unwrap();
         assert_eq!(
@@ -259,6 +425,7 @@ mod tests {
             }
         )
     }
+    #[test]
     fn swizzle_parse_5() {
         let swzl = Swizzle::try_parse("gb").unwrap();
         assert_eq!(

@@ -1,7 +1,8 @@
-use std::{collections::HashSet, str::FromStr};
+use perfect_derive::perfect_derive;
+use std::str::FromStr;
 use strum::VariantNames;
 
-use crate::{join_into_readable_list, spans::Spanned};
+use crate::{arena::Arena, join_into_readable_list};
 
 use super::spans;
 
@@ -138,19 +139,19 @@ impl SoftwareExtensionName {
 }
 
 /// A set of directives, occuring before definitions in a module.
-#[derive(Debug, Clone, Hash)]
+#[perfect_derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Directives<S: spans::Spanning = spans::WithSpans> {
-    pub diagnostics: Vec<S::Spanned<SeverityControlName>>,
-    pub enable_extensions: Vec<S::Spanned<EnableExtensionName>>,
-    pub software_extensions: Vec<S::Spanned<SoftwareExtensionName>>,
+    pub diagnostics: Arena<SeverityControlName, S>,
+    pub enable_extensions: Arena<EnableExtensionName, S>,
+    pub software_extensions: Arena<SoftwareExtensionName, S>,
 }
 
 impl<S: spans::Spanning> Directives<S> {
     pub fn empty() -> Self {
         Self {
-            diagnostics: vec![],
-            enable_extensions: vec![],
-            software_extensions: vec![],
+            diagnostics: Arena::new(),
+            enable_extensions: Arena::new(),
+            software_extensions: Arena::new(),
         }
     }
 }
@@ -162,8 +163,8 @@ impl Directives<spans::WithSpans> {
     /// ```rust
     /// # use ewgsl::parsing::ParsedModule;
     ///
-    /// let mod1 = ParsedModule::parse("diagnostic off;")
-    /// let mod2 = ParsedModule::parse("   diagnostic     off   ; ")
+    /// let mod1 = ParsedModule::parse("shader1.ewgsl", "diagnostic off;").unwrap();
+    /// let mod2 = ParsedModule::parse("shader2.ewgsl", "   diagnostic     off   ; ").unwrap();
     ///
     /// assert!(mod1 != mod2);
     /// assert!(mod1.erase_spans() == mod2.erase_spans());
@@ -175,29 +176,6 @@ impl Directives<spans::WithSpans> {
             software_extensions: self.software_extensions.erase_spans(),
         }
     }
-}
-
-impl<S: spans::Spanning> PartialEq for Directives<S>
-where
-    S::Spanned<SeverityControlName>: std::hash::Hash + Eq,
-    S::Spanned<EnableExtensionName>: std::hash::Hash + Eq,
-    S::Spanned<SoftwareExtensionName>: std::hash::Hash + Eq,
-{
-    fn eq(&self, other: &Self) -> bool {
-        fn vecs_contain_same<T: std::hash::Hash + Eq>(v1: &Vec<T>, v2: &Vec<T>) -> bool {
-            v1.iter().collect::<HashSet<_>>() == v2.iter().collect::<HashSet<_>>()
-        }
-        vecs_contain_same(&self.diagnostics, &other.diagnostics)
-            && vecs_contain_same(&self.enable_extensions, &other.enable_extensions)
-            && vecs_contain_same(&self.software_extensions, &other.software_extensions)
-    }
-}
-impl<S: spans::Spanning> Eq for Directives<S>
-where
-    S::Spanned<SeverityControlName>: std::hash::Hash + Eq,
-    S::Spanned<EnableExtensionName>: std::hash::Hash + Eq,
-    S::Spanned<SoftwareExtensionName>: std::hash::Hash + Eq,
-{
 }
 
 impl<S: spans::Spanning> Default for Directives<S> {

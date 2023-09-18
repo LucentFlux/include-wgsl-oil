@@ -4,12 +4,12 @@ use strum::VariantNames;
 use crate::{
     arena::Handle,
     join_into_readable_list,
-    spans::{self, WithSpan},
+    spans::{self, Spanned, WithSpan},
 };
 
 use super::{expression::Expression, ParsedModule};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, strum::EnumDiscriminants)]
+#[derive(Debug, Clone, strum::EnumDiscriminants)]
 #[strum_discriminants(derive(
     PartialOrd,
     Ord,
@@ -19,7 +19,7 @@ use super::{expression::Expression, ParsedModule};
     strum::IntoStaticStr,
 ))]
 #[strum_discriminants(name(AttributeIdentifier))]
-pub enum AttributeInner<'a, S: spans::Spanning> {
+pub enum AttributeInner<'a, S: spans::Spanning = spans::WithSpans> {
     #[strum_discriminants(strum(serialize = "align"))]
     Align(Handle<Expression<'a, S>>),
     #[strum_discriminants(strum(serialize = "binding"))]
@@ -107,6 +107,44 @@ impl AttributeIdentifier {
             AttributeIdentifier::Compute => 0..=0,
         };
         *range_inclusive.start()..*range_inclusive.end() + 1
+    }
+}
+
+impl<'a> Spanned for AttributeInner<'a> {
+    type Spanless = AttributeInner<'a, spans::WithoutSpans>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        match self {
+            AttributeInner::Align(h) => AttributeInner::Align(h.erase_spans()),
+            AttributeInner::Binding(h) => AttributeInner::Binding(h.erase_spans()),
+            AttributeInner::Builtin(h) => AttributeInner::Builtin(h.erase_spans()),
+            AttributeInner::Const => AttributeInner::Const,
+            AttributeInner::Diagnostic { severity, trigger } => AttributeInner::Diagnostic {
+                severity: severity.erase_spans(),
+                trigger: trigger.erase_spans(),
+            },
+            AttributeInner::Group(h) => AttributeInner::Group(h.erase_spans()),
+            AttributeInner::Id(h) => AttributeInner::Id(h.erase_spans()),
+            AttributeInner::Interpolate {
+                inv_type,
+                inv_sampling,
+            } => AttributeInner::Interpolate {
+                inv_type: inv_type.erase_spans(),
+                inv_sampling: inv_sampling.map(|h| h.erase_spans()),
+            },
+            AttributeInner::Invariant => AttributeInner::Invariant,
+            AttributeInner::Location(h) => AttributeInner::Location(h.erase_spans()),
+            AttributeInner::MustUse => AttributeInner::MustUse,
+            AttributeInner::Size(h) => AttributeInner::Size(h.erase_spans()),
+            AttributeInner::WorkgroupSize { x, y, z } => AttributeInner::WorkgroupSize {
+                x: x.erase_spans(),
+                y: y.map(|y| y.erase_spans()),
+                z: z.map(|z| z.erase_spans()),
+            },
+            AttributeInner::Vertex => AttributeInner::Vertex,
+            AttributeInner::Fragment => AttributeInner::Fragment,
+            AttributeInner::Compute => AttributeInner::Compute,
+        }
     }
 }
 
@@ -201,5 +239,16 @@ impl<'a> Attribute<'a> {
             identifier_span,
             inner,
         });
+    }
+}
+
+impl<'a> Spanned for Attribute<'a> {
+    type Spanless = Attribute<'a, spans::WithoutSpans>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        Attribute {
+            identifier_span: (),
+            inner: self.inner.erase_spans(),
+        }
     }
 }

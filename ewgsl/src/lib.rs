@@ -112,6 +112,7 @@ fn get_recommended_alternative<'a>(found: &str, alternatives: &[&'a str]) -> Opt
     for alternative in alternatives.into_iter() {
         let dist = edit_distance(found, alternative, 1, 1, 1);
         if dist < min_dist {
+            min_dist = dist;
             min_found = Some(*alternative)
         }
     }

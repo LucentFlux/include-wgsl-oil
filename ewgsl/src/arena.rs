@@ -1,13 +1,6 @@
 //! Taken (with modification) from https://github.com/gfx-rs/naga/blob/master/src/arena.rs
 
-use std::{
-    cmp::Ordering,
-    fmt::{self, Debug},
-    hash::{self, Hash},
-    marker::PhantomData,
-    num::NonZeroU32,
-    ops,
-};
+use std::{collections::HashSet, fmt, hash::Hash, marker::PhantomData, num::NonZeroU32, ops};
 
 use crate::spans::{self, Spanned};
 
@@ -75,7 +68,9 @@ impl<T> Clone for Handle<T> {
 
 impl<T> Copy for Handle<T> {}
 
-impl<T> PartialEq for Handle<T> {
+// Does not make sense to compare handles, since they are essentially pointers.
+// We should only compare their pointed to objects, which may be in different arenas.
+/*impl<T> PartialEq for Handle<T> {
     fn eq(&self, other: &Self) -> bool {
         self.index == other.index
     }
@@ -95,15 +90,16 @@ impl<T> Ord for Handle<T> {
     }
 }
 
-impl<T> fmt::Debug for Handle<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        write!(formatter, "[{}]", self.index)
-    }
-}
-
 impl<T> hash::Hash for Handle<T> {
     fn hash<H: hash::Hasher>(&self, hasher: &mut H) {
         self.index.hash(hasher)
+    }
+}
+*/
+
+impl<T> fmt::Debug for Handle<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "[{}]", self.index)
     }
 }
 
@@ -158,21 +154,6 @@ impl BadHandleRange {
 pub struct Arena<T, S: spans::Spanning = spans::WithSpans> {
     /// Values of this arena.
     data: Vec<S::Spanned<T>>,
-}
-
-impl<T, S: spans::Spanning> Default for Arena<T, S> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T, S: spans::Spanning> fmt::Debug for Arena<T, S>
-where
-    S::Spanned<T>: Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
-    }
 }
 
 impl<T, S: spans::Spanning> Arena<T, S> {
@@ -234,18 +215,51 @@ impl<T, S: spans::Spanning> Arena<T, S> {
         self.data.clear()
     }
 
+    /// Reserves capacity for at least `additional` more elements to be inserted
+    /// in the given `Vec<T>`. The collection may reserve more space to
+    /// speculatively avoid frequent reallocations. After calling `reserve`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if capacity is already sufficient.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds `isize::MAX` bytes.
+    pub fn reserve(&mut self, additional: usize) {
+        self.data.reserve(additional)
+    }
+
+    /// Reserves the minimum capacity for at least `additional` more elements to
+    /// be inserted in the given `Vec<T>`. Unlike [`reserve`], this will not
+    /// deliberately over-allocate to speculatively avoid frequent allocations.
+    /// After calling `reserve_exact`, capacity will be greater than or equal to
+    /// `self.len() + additional`. Does nothing if the capacity is already
+    /// sufficient.
+    ///
+    /// Note that the allocator may give the collection more space than it
+    /// requests. Therefore, capacity can not be relied upon to be precisely
+    /// minimal. Prefer [`reserve`] if future insertions are expected.
+    ///
+    /// [`reserve`]: Vec::reserve
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds `isize::MAX` bytes.
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.data.reserve_exact(additional)
+    }
+
     /// Assert that `handle` is valid for this arena.
     pub fn contains_handle(&self, handle: Handle<T>) -> bool {
         return handle.index() < self.data.len();
     }
 
     /// Maps this arena to a new one, where each handle for this one is still valid for the new one, and where the spans are unchanged.
-    pub fn map<U>(&self, f: impl FnMut(T) -> U) -> Arena<U, S> {
+    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Arena<U, S> {
         Arena {
             data: self
                 .data
                 .into_iter()
-                .map(|v| S::map_spanned(v, f))
+                .map(move |v| S::map_spanned(v, &mut f))
                 .collect(),
         }
     }
@@ -258,6 +272,33 @@ impl<T> Arena<T, spans::WithSpans> {
         Arena {
             data: self.data.into_iter().map(|vs| vs.inner).collect(),
         }
+    }
+}
+
+impl<T, S: spans::Spanning> Default for Arena<T, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> From<Vec<spans::WithSpan<T>>> for Arena<T, spans::WithSpans> {
+    fn from(data: Vec<spans::WithSpan<T>>) -> Self {
+        Self { data }
+    }
+}
+
+impl<T> From<Vec<T>> for Arena<T, spans::WithoutSpans> {
+    fn from(data: Vec<T>) -> Self {
+        Self { data }
+    }
+}
+
+impl<T, S: spans::Spanning> fmt::Debug for Arena<T, S>
+where
+    S::Spanned<T>: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
     }
 }
 
@@ -281,20 +322,87 @@ impl<T, S: spans::Spanning> ops::Index<HandleRange<T>> for Arena<T, S> {
     }
 }
 
+impl<T, S: spans::Spanning> PartialEq for Arena<T, S>
+where
+    <S as spans::Spanning>::Spanned<T>: Hash + Eq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        fn vecs_contain_same<T: std::hash::Hash + Eq>(v1: &Vec<T>, v2: &Vec<T>) -> bool {
+            v1.iter().collect::<HashSet<_>>() == v2.iter().collect::<HashSet<_>>()
+        }
+        return vecs_contain_same(&self.data, &other.data);
+    }
+}
+
+impl<T, S: spans::Spanning> Eq for Arena<T, S> where <S as spans::Spanning>::Spanned<T>: Hash + Eq {}
+
+/// Akin to the [`vec`] macro, for creating an arena inline, with or without spans.
+///
+/// # Usage
+///
+/// With spans:
+/// ```
+/// # let span1 = ewgsl::spans::Span::empty();
+/// # let span2 = ewgsl::spans::Span::empty();
+/// # let v1 = 12;
+/// # let v2 = 24;
+/// let arena = ewgsl::arena![
+///     span1 => v1,
+///     span2 => v2,
+///     /* ... */
+/// ];
+/// ```
+///
+/// Without spans:
+/// ```
+/// # let v1 = 7usize;
+/// # let v2 = 0usize;
+/// let arena = ewgsl::arena![
+///     v1,
+///     v2,
+///     /* ... */
+/// ];
+/// ```
+#[macro_export]
+macro_rules! arena {
+    (
+        $($span:expr => $item:expr),* $(,)?
+    ) => {
+        $crate::arena::Arena::<_, $crate::spans::WithSpans>::from(vec![
+            $(
+                $crate::spans::WithSpan {
+                    span: $span,
+                    inner: $item,
+                }
+            ),*
+        ])
+    };
+
+    (
+        $($item:expr),* $(,)?
+    ) => {
+        $crate::arena::Arena::<_, $crate::spans::WithoutSpans>::from(vec![
+            $($item),*
+        ])
+    };
+}
+pub use arena;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn empty_handle_range_is_empty() {
-        assert!(empty_handle_range::<u8>().is_empty())
+        let empty = empty_handle_range::<u8>();
+        assert!(empty.start.index >= empty.end.index)
     }
     #[test]
     fn append_non_unique() {
         let mut arena: Arena<u8, spans::WithoutSpans> = Arena::new();
         let t1 = arena.append(0);
         let t2 = arena.append(0);
-        assert!(t1 != t2);
+        assert!(t1.index != t2.index);
         assert!(arena[t1] == arena[t2]);
     }
 
@@ -303,7 +411,7 @@ mod tests {
         let mut arena: Arena<u8, spans::WithoutSpans> = Arena::new();
         let t1 = arena.append(0);
         let t2 = arena.append(1);
-        assert!(t1 != t2);
+        assert!(t1.index != t2.index);
         assert!(arena[t1] != arena[t2]);
     }
 }

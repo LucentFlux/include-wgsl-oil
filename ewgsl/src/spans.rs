@@ -1,4 +1,13 @@
-use std::{fmt::Debug, hash::Hash};
+use std::{
+    fmt::Debug,
+    hash::Hash,
+    ops::{Deref, Range},
+};
+
+use crate::parsing::{
+    expression::{BinaryOperator, Swizzle, UnaryOperator},
+    ident::Ident,
+};
 
 /// A start (inclusive) and end (exclusive) within a given string marking the location of some text of interest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -8,6 +17,10 @@ pub struct Span {
 }
 
 impl Span {
+    pub fn empty() -> Self {
+        Self { start: 0, end: 0 }
+    }
+
     /// The start (inclusive) byte that this span covers.
     pub fn start(&self) -> usize {
         self.start
@@ -61,6 +74,30 @@ impl<T> Spanned for WithSpan<T> {
     }
 }
 
+impl<T> MaybeSpanned<T> for WithSpan<T> {
+    type Span = Span;
+    type Mapped<U> = WithSpan<U>;
+
+    fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    fn span(&self) -> Self::Span {
+        self.span
+    }
+
+    fn map_spanned<U>(self, f: impl FnOnce(T) -> U) -> Self::Mapped<U> {
+        WithSpan {
+            inner: f(self.inner),
+            span: self.span,
+        }
+    }
+}
+
 impl<T> AsRef<T> for WithSpan<T> {
     fn as_ref(&self) -> &T {
         &self.inner
@@ -73,6 +110,14 @@ impl<T> AsMut<T> for WithSpan<T> {
     }
 }
 
+impl<T> Deref for WithSpan<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 /// Marker type denoting that this object carries span information with its children.
 #[derive(Debug)]
 pub struct WithSpans(());
@@ -80,8 +125,47 @@ pub struct WithSpans(());
 #[derive(Debug)]
 pub struct WithoutSpans(());
 
+/// Represents an object that may or may not carry span information about the type `T`.
+pub trait MaybeSpanned<T> {
+    /// The span information carried, or `()`.
+    type Span: PartialEq + Eq + Debug + Hash + Copy + Clone;
+    /// Another, equally spanned object but holding a different value.
+    type Mapped<U>: MaybeSpanned<U, Span = Self::Span>;
+
+    fn inner(&self) -> &T;
+    fn inner_mut(&mut self) -> &mut T;
+
+    /// Extracts just the span information from this object
+    fn span(&self) -> Self::Span;
+
+    /// Maps this possibly spanned object, preserving any span information.
+    fn map_spanned<U>(self, f: impl FnOnce(T) -> U) -> Self::Mapped<U>;
+}
+
+impl<T> MaybeSpanned<T> for T {
+    type Span = ();
+    type Mapped<U> = U;
+
+    fn inner(&self) -> &T {
+        self
+    }
+
+    fn inner_mut(&mut self) -> &mut T {
+        self
+    }
+
+    fn span(&self) -> Self::Span {
+        ()
+    }
+
+    fn map_spanned<U>(self, f: impl FnOnce(T) -> U) -> Self::Mapped<U> {
+        f(self)
+    }
+}
+
 mod sealed {
     use super::*;
+
     pub trait SpanPairSealed {}
     impl SpanPairSealed for WithSpans {}
     impl SpanPairSealed for WithoutSpans {}
@@ -90,39 +174,18 @@ mod sealed {
 /// Represents that either the object has span information (using the [`WithSpans`] marker type), or that it does not
 /// (using the [`WithoutSpans`] marker type).
 pub trait Spanning: sealed::SpanPairSealed + Debug {
-    type Spanned<T>;
-    type Span;
-
-    /// Maps a spanned object, preserving any span information.
-    fn map_spanned<T, U>(v: Self::Spanned<T>, f: impl FnOnce(T) -> U) -> Self::Spanned<U>;
-    fn get_span<T>(v: &Self::Spanned<T>) -> Self::Span;
+    type Spanned<T>: MaybeSpanned<T, Span = Self::Span>;
+    type Span: PartialEq + Eq + Debug + Hash + Copy + Clone;
 }
 
 impl Spanning for WithSpans {
     type Spanned<T> = WithSpan<T>;
     type Span = Span;
-
-    fn map_spanned<T, U>(v: Self::Spanned<T>, f: impl FnOnce(T) -> U) -> Self::Spanned<U> {
-        WithSpan {
-            span: v.span,
-            inner: f(v.inner),
-        }
-    }
-    fn get_span<T>(v: &Self::Spanned<T>) -> Self::Span {
-        v.span
-    }
 }
 
 impl Spanning for WithoutSpans {
     type Spanned<T> = T;
     type Span = ();
-
-    fn map_spanned<T, U>(v: Self::Spanned<T>, f: impl FnOnce(T) -> U) -> Self::Spanned<U> {
-        f(v)
-    }
-    fn get_span<T>(_: &Self::Spanned<T>) -> Self::Span {
-        ()
-    }
 }
 
 /// Indicates that an object has span information that can be stripped.
@@ -137,5 +200,13 @@ impl<T: Spanned> Spanned for Vec<T> {
 
     fn erase_spans(self) -> Self::Spanless {
         self.into_iter().map(T::erase_spans).collect()
+    }
+}
+
+impl<T: Spanned> Spanned for Range<T> {
+    type Spanless = Range<T::Spanless>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        self.start.erase_spans()..self.end.erase_spans()
     }
 }

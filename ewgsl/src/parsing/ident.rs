@@ -1,8 +1,10 @@
+use std::ops::Deref;
+
 use perfect_derive::perfect_derive;
 
 use crate::{
-    arena::Handle,
-    spans::{self, Span, Spanned, WithSpan},
+    arena::{Arena, Handle},
+    spans::{self, Spanned},
 };
 
 use super::expression::Expression;
@@ -203,13 +205,13 @@ pub enum InvalidIdentifierReason {
 
 /// Some single word without spaces or punctuation, which isn't a keyword or reserved word,
 /// and which doesn't start with "__".
-#[derive(Debug)]
-pub struct Ident<'a, S: spans::Spanning = spans::WithSpans> {
-    ident: S::Spanned<&'a str>,
+#[derive(Debug, Hash, PartialEq, Eq)]
+pub struct Ident<'a> {
+    ident: &'a str,
 }
 
 impl<'a> Ident<'a> {
-    pub fn try_parse(ident: &'a str, span: Span) -> Result<Self, InvalidIdentifierReason> {
+    pub fn try_parse(ident: &'a str) -> Result<Self, InvalidIdentifierReason> {
         if ident == "_" {
             return Err(InvalidIdentifierReason::WasSingleUnderscore);
         }
@@ -223,32 +225,50 @@ impl<'a> Ident<'a> {
             return Err(InvalidIdentifierReason::WasReservedWord);
         }
 
-        return Ok(Self {
-            ident: WithSpan { inner: ident, span },
-        });
-    }
-}
-
-impl<'a> Spanned for Ident<'a> {
-    type Spanless = Ident<'a, spans::WithoutSpans>;
-
-    fn erase_spans(self) -> Self::Spanless {
-        Ident {
-            ident: self.ident.erase_spans(),
-        }
+        return Ok(Self { ident: ident });
     }
 }
 
 impl<'a> AsRef<str> for Ident<'a> {
     fn as_ref(&self) -> &str {
-        self.ident.inner
+        self.ident
+    }
+}
+
+impl<'a> Deref for Ident<'a> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.ident
     }
 }
 
 #[perfect_derive(Debug)]
 pub struct TemplatedIdent<'a, S: spans::Spanning = spans::WithSpans> {
-    pub ident: Ident<'a, S>,
+    pub ident: S::Spanned<Ident<'a>>,
     pub args: Vec<Handle<Expression<'a, S>>>,
+}
+
+impl<'a, S: spans::Spanning> TemplatedIdent<'a, S>
+where
+    S::Spanned<Ident<'a>>: PartialEq,
+    S::Spanned<Expression<'a, S>>: PartialEq,
+{
+    // Checks if this templated ident is equal to another, given two (possibly different) arenas of expressions.
+    pub fn eq_in(
+        &self,
+        lhs_arena: &Arena<Expression<'a, S>, S>,
+        rhs: &Self,
+        rhs_arena: &Arena<Expression<'a, S>, S>,
+    ) -> bool {
+        return self.ident == rhs.ident
+            && self.args.len() == rhs.args.len()
+            && self
+                .args
+                .iter()
+                .zip(&rhs.args)
+                .all(|(lhs, rhs)| lhs.eq_in(lhs_arena, rhs, rhs_arena));
+    }
 }
 
 impl<'a> Spanned for TemplatedIdent<'a, spans::WithSpans> {
