@@ -1,35 +1,49 @@
-use std::{borrow::Borrow, ops::Range};
+use std::ops::Range;
 
 use perfect_derive::perfect_derive;
 
 use crate::{
-    arena::Handle,
-    spans::{self, Spanned, Wrapper},
+    arena::{Arena, Handle},
+    spans::{self, Spanned},
+    EqIn,
 };
 
 use super::{attributes::Attribute, expression::Expression, ident};
 
 #[perfect_derive(Debug)]
-pub struct TypeSpecifier<'a, S: spans::Spanning = spans::WithSpans>(
+pub struct TypeSpecifier<'a, S: spans::SpanState = spans::SpansPresent>(
     pub ident::TemplatedIdent<'a, S>,
 );
 
 impl<'a> Spanned for TypeSpecifier<'a> {
-    type Spanless = TypeSpecifier<'a, spans::WithoutSpans>;
+    type Spanless = TypeSpecifier<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         TypeSpecifier(self.0.erase_spans())
     }
 }
 
+impl<'a, S: spans::SpanState> EqIn<'a> for TypeSpecifier<'a, S> {
+    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        self.0.eq_in(own_context, &other.0, other_context)
+    }
+}
+
 #[perfect_derive(Debug)]
-pub struct OptionallyTypedIdent<'a, S: spans::Spanning = spans::WithSpans> {
-    pub ident: S::Spanned<ident::Ident<'a>>,
+pub struct OptionallyTypedIdent<'a, S: spans::SpanState = spans::SpansPresent> {
+    pub ident: spans::WithSpan<ident::Ident<'a>, S>,
     pub ty: Option<TypeSpecifier<'a, S>>,
 }
 
 impl<'a> Spanned for OptionallyTypedIdent<'a> {
-    type Spanless = OptionallyTypedIdent<'a, spans::WithoutSpans>;
+    type Spanless = OptionallyTypedIdent<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         OptionallyTypedIdent {
@@ -38,14 +52,36 @@ impl<'a> Spanned for OptionallyTypedIdent<'a> {
         }
     }
 }
+
+impl<'a, S: spans::SpanState> EqIn<'a> for OptionallyTypedIdent<'a, S> {
+    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        if !self.ident.eq(&other.ident) {
+            return false;
+        }
+
+        if !self.ty.eq_in(own_context, &other.ty, other_context) {
+            return false;
+        }
+
+        return true;
+    }
+}
+
 #[perfect_derive(Debug)]
-pub struct VariableDeclaration<'a, S: spans::Spanning = spans::WithSpans> {
+pub struct VariableDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
     pub template_list: Vec<Handle<Expression<'a, S>>>,
     pub ident: OptionallyTypedIdent<'a, S>,
 }
 
 impl<'a> Spanned for VariableDeclaration<'a> {
-    type Spanless = VariableDeclaration<'a, spans::WithoutSpans>;
+    type Spanless = VariableDeclaration<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         VariableDeclaration {
@@ -55,27 +91,97 @@ impl<'a> Spanned for VariableDeclaration<'a> {
     }
 }
 
+impl<'a, S: spans::SpanState> EqIn<'a> for VariableDeclaration<'a, S> {
+    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        // Templates - assume ordered
+        if self.template_list.len() != other.template_list.len() {
+            return false;
+        }
+        for (lhs, rhs) in self.template_list.iter().zip(&other.template_list) {
+            if !lhs.eq_in(own_context, rhs, other_context) {
+                return false;
+            }
+        }
+
+        // Ident
+        if !self.ident.eq_in(own_context, &other.ident, other_context) {
+            return false;
+        }
+
+        return true;
+    }
+}
+
 #[perfect_derive(Debug)]
-pub struct GlobalVariableDeclaration<'a, S: spans::Spanning = spans::WithSpans> {
+pub struct GlobalVariableDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
     pub attributes: Range<Handle<Attribute<'a, S>>>,
-    pub decl: S::Spanned<VariableDeclaration<'a, S>>,
+    pub decl: spans::WithSpan<VariableDeclaration<'a, S>, S>,
     pub init: Option<Handle<Expression<'a, S>>>,
 }
 
-impl<'a, S: spans::Spanning> GlobalVariableDeclaration<'a, S> {
+impl<'a, S: spans::SpanState> GlobalVariableDeclaration<'a, S> {
     pub fn name<'b>(&'b self) -> &'b str {
-        self.decl.unwrap().ident.ident.unwrap()
+        self.decl.inner().ident.ident.inner()
     }
 }
 
 impl<'a> Spanned for GlobalVariableDeclaration<'a> {
-    type Spanless = GlobalVariableDeclaration<'a, spans::WithoutSpans>;
+    type Spanless = GlobalVariableDeclaration<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         GlobalVariableDeclaration {
             attributes: self.attributes.erase_spans(),
-            decl: self.decl.erase_spans().erase_spans(),
+            decl: self.decl.erase_spans().map(Spanned::erase_spans),
             init: self.init.map(|init| init.erase_spans()),
         }
+    }
+}
+
+impl<'a, S: spans::SpanState> EqIn<'a> for GlobalVariableDeclaration<'a, S> {
+    type Context<'b> = (&'b Arena<Attribute<'a, S>, S>, &'b Arena<Expression<'a, S>, S>) where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        // Check attributes
+        // Ranges are generated by parsing code so should be valid
+        let lhs_attributes = &own_context.0[self.attributes.clone()];
+        let rhs_attributes = &other_context.0[other.attributes.clone()];
+        if lhs_attributes.len() != rhs_attributes.len() {
+            return false;
+        }
+        for (lhs, rhs) in lhs_attributes.into_iter().zip(rhs_attributes) {
+            if !lhs.eq_in(&own_context.1, rhs, &other_context.1) {
+                return false;
+            }
+        }
+
+        // Check declaration
+        if !self
+            .decl
+            .eq_in(&own_context.1, &other.decl, &other_context.1)
+        {
+            return false;
+        }
+
+        // Check initialisation
+        if !self
+            .init
+            .eq_in(&own_context.1, &other.init, &other_context.1)
+        {
+            return false;
+        }
+
+        return true;
     }
 }

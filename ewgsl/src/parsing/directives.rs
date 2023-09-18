@@ -140,13 +140,13 @@ impl SoftwareExtensionName {
 
 /// A set of directives, occuring before definitions in a module.
 #[perfect_derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Directives<S: spans::Spanning = spans::WithSpans> {
+pub struct Directives<S: spans::SpanState = spans::SpansPresent> {
     pub diagnostics: Arena<SeverityControlName, S>,
     pub enable_extensions: Arena<EnableExtensionName, S>,
     pub software_extensions: Arena<SoftwareExtensionName, S>,
 }
 
-impl<S: spans::Spanning> Directives<S> {
+impl<S: spans::SpanState> Directives<S> {
     pub fn empty() -> Self {
         Self {
             diagnostics: Arena::new(),
@@ -156,7 +156,7 @@ impl<S: spans::Spanning> Directives<S> {
     }
 }
 
-impl Directives<spans::WithSpans> {
+impl Directives<spans::SpansPresent> {
     /// Remove all of the span information from these directives. Useful when testing semantic equivalence
     /// of objects:
     ///
@@ -169,7 +169,7 @@ impl Directives<spans::WithSpans> {
     /// assert!(mod1 != mod2);
     /// assert!(mod1.erase_spans() == mod2.erase_spans());
     /// ```
-    pub fn erase_spans(self) -> Directives<spans::WithoutSpans> {
+    pub fn erase_spans(self) -> Directives<spans::SpansErased> {
         Directives {
             diagnostics: self.diagnostics.erase_spans(),
             enable_extensions: self.enable_extensions.erase_spans(),
@@ -178,7 +178,7 @@ impl Directives<spans::WithSpans> {
     }
 }
 
-impl<S: spans::Spanning> Default for Directives<S> {
+impl<S: spans::SpanState> Default for Directives<S> {
     fn default() -> Self {
         Self::empty()
     }

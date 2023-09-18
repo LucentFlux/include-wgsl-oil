@@ -1,13 +1,14 @@
-use std::mem::{discriminant, Discriminant};
+use std::mem::discriminant;
 
 use perfect_derive::perfect_derive;
 
 use crate::{
     arena::{Arena, Handle},
-    spans::{self, MaybeSpanned, Spanned},
+    spans::{self, Spanned, WithSpan},
+    EqIn,
 };
 
-use super::ident::{Ident, TemplatedIdent};
+use super::ident::TemplatedIdent;
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum BinaryOperator {
@@ -137,16 +138,12 @@ impl Swizzle {
 }
 
 #[perfect_derive(Debug)]
-pub struct CallPhrase<'a, S: spans::Spanning = spans::WithSpans> {
+pub struct CallPhrase<'a, S: spans::SpanState = spans::SpansPresent> {
     pub ident: TemplatedIdent<'a, S>,
     pub args: Vec<Handle<Expression<'a, S>>>,
 }
 
-impl<'a, S: spans::Spanning> CallPhrase<'a, S>
-where
-    S::Spanned<Ident<'a>>: PartialEq,
-    S::Spanned<Expression<'a, S>>: PartialEq,
-{
+impl<'a, S: spans::SpanState> CallPhrase<'a, S> {
     // Checks if this call phrase is equal to another, given two (possibly different) arenas of expressions.
     pub fn eq_in(
         &self,
@@ -158,7 +155,7 @@ where
             && self.args.len() == rhs.args.len()
             && self.args.iter().zip(&rhs.args).all(|(lhs, rhs)| {
                 match (lhs_arena.try_get(*lhs), rhs_arena.try_get(*rhs)) {
-                    (Ok(lhs), Ok(rhs)) => lhs == rhs,
+                    (Ok(lhs), Ok(rhs)) => lhs.eq_in(lhs_arena, rhs, rhs_arena),
                     (Err(_), Err(_)) => true,
                     _ => false,
                 }
@@ -167,7 +164,7 @@ where
 }
 
 impl<'a> Spanned for CallPhrase<'a> {
-    type Spanless = CallPhrase<'a, spans::WithoutSpans>;
+    type Spanless = CallPhrase<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         CallPhrase {
@@ -178,7 +175,7 @@ impl<'a> Spanned for CallPhrase<'a> {
 }
 
 #[perfect_derive(Debug, Clone)]
-pub enum Expression<'a, S: spans::Spanning = spans::WithSpans> {
+pub enum Expression<'a, S: spans::SpanState = spans::SpansPresent> {
     Literal {
         value: Literal<'a>,
     },
@@ -187,12 +184,12 @@ pub enum Expression<'a, S: spans::Spanning = spans::WithSpans> {
     },
     Call(CallPhrase<'a, S>),
     Unary {
-        op: S::Spanned<UnaryOperator>,
+        op: WithSpan<UnaryOperator, S>,
         expr: Handle<Expression<'a, S>>,
     },
     Binary {
         lhs: Handle<Expression<'a, S>>,
-        op: S::Spanned<BinaryOperator>,
+        op: WithSpan<BinaryOperator, S>,
         rhs: Handle<Expression<'a, S>>,
     },
     Index {
@@ -201,65 +198,51 @@ pub enum Expression<'a, S: spans::Spanning = spans::WithSpans> {
     },
     Swizzle {
         base: Handle<Expression<'a, S>>,
-        swizzle: S::Spanned<Swizzle>,
+        swizzle: WithSpan<Swizzle, S>,
     },
     MemberAccess {
         base: Handle<Expression<'a, S>>,
-        member: S::Spanned<&'a str>,
+        member: WithSpan<&'a str, S>,
     },
     Parenthesized(Handle<Expression<'a, S>>),
 }
 
-impl<'a, S: spans::Spanning> Handle<Expression<'a, S>>
-where
-    // Are all true all of the time, but rust's typechecking currently doesn't know it.
-    S::Spanned<&'a str>: PartialEq,
-    S::Spanned<Ident<'a>>: PartialEq,
-    S::Spanned<UnaryOperator>: PartialEq,
-    S::Spanned<BinaryOperator>: PartialEq,
-    S::Spanned<Swizzle>: PartialEq,
-{
-    pub fn eq_in(
-        &self,
-        lhs_arena: &Arena<Expression<'a, S>, S>,
-        rhs: &Self,
-        rhs_arena: &Arena<Expression<'a, S>, S>,
+impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Expression<'a, S>> {
+    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
     ) -> bool {
-        match (lhs_arena.try_get(*self), rhs_arena.try_get(*rhs)) {
-            (Ok(lhs), Ok(rhs)) => {
-                lhs.span() == rhs.span() && lhs.inner().eq_in(lhs_arena, rhs.inner(), rhs_arena)
-            }
+        match (own_context.try_get(*self), other_context.try_get(*other)) {
+            (Ok(lhs), Ok(rhs)) => lhs.eq_in(own_context, rhs, other_context),
             (Err(_), Err(_)) => true,
             _ => false,
         }
     }
 }
 
-impl<'a, S: spans::Spanning> Expression<'a, S>
-where
-    S::Spanned<&'a str>: PartialEq,
-    S::Spanned<Ident<'a>>: PartialEq,
-    S::Spanned<UnaryOperator>: PartialEq,
-    S::Spanned<BinaryOperator>: PartialEq,
-    S::Spanned<Swizzle>: PartialEq,
-{
-    // Checks if this expression is equal to another, given two (possibly different) arenas.
-    pub fn eq_in(
-        &self,
-        lhs_arena: &Arena<Expression<'a, S>, S>,
-        rhs: &Self,
-        rhs_arena: &Arena<Expression<'a, S>, S>,
+impl<'a, S: spans::SpanState> EqIn<'a> for Expression<'a, S> {
+    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
     ) -> bool {
-        if discriminant(self) != discriminant(rhs) {
+        if discriminant(self) != discriminant(other) {
             return false;
         }
 
-        match (self, rhs) {
+        match (self, other) {
             (Self::Literal { value: lhs }, Self::Literal { value: rhs }) => lhs == rhs,
             (Self::Identifier { ident: lhs }, Self::Identifier { ident: rhs }) => {
-                lhs.eq_in(lhs_arena, rhs, rhs_arena)
+                lhs.eq_in(own_context, rhs, other_context)
             }
-            (Self::Call(lhs), Self::Call(rhs)) => lhs.eq_in(lhs_arena, rhs, rhs_arena),
+            (Self::Call(lhs), Self::Call(rhs)) => lhs.eq_in(own_context, rhs, other_context),
             (
                 Self::Unary {
                     op: lhs_op,
@@ -269,7 +252,7 @@ where
                     op: rhs_op,
                     expr: rhs_expr,
                 },
-            ) => lhs_op == rhs_op && lhs_expr.eq_in(lhs_arena, rhs_expr, rhs_arena),
+            ) => lhs_op == rhs_op && lhs_expr.eq_in(own_context, rhs_expr, other_context),
             (
                 Self::Binary {
                     lhs: lhs_expr_of_lhs,
@@ -283,8 +266,8 @@ where
                 },
             ) => {
                 lhs_op == rhs_op
-                    && lhs_expr_of_lhs.eq_in(lhs_arena, lhs_expr_of_rhs, rhs_arena)
-                    && rhs_expr_of_lhs.eq_in(lhs_arena, rhs_expr_of_rhs, rhs_arena)
+                    && lhs_expr_of_lhs.eq_in(own_context, lhs_expr_of_rhs, other_context)
+                    && rhs_expr_of_lhs.eq_in(own_context, rhs_expr_of_rhs, other_context)
             }
             (
                 Self::Index {
@@ -296,8 +279,8 @@ where
                     index: rhs_index,
                 },
             ) => {
-                lhs_base.eq_in(lhs_arena, rhs_base, rhs_arena)
-                    && lhs_index.eq_in(lhs_arena, rhs_index, rhs_arena)
+                lhs_base.eq_in(own_context, rhs_base, other_context)
+                    && lhs_index.eq_in(own_context, rhs_index, other_context)
             }
             (
                 Self::Swizzle {
@@ -308,7 +291,7 @@ where
                     base: rhs_base,
                     swizzle: rhs_swizzle,
                 },
-            ) => lhs_base.eq_in(lhs_arena, rhs_base, rhs_arena) && lhs_swizzle == rhs_swizzle,
+            ) => lhs_base.eq_in(own_context, rhs_base, other_context) && lhs_swizzle == rhs_swizzle,
             (
                 Self::MemberAccess {
                     base: lhs_base,
@@ -318,17 +301,17 @@ where
                     base: rhs_base,
                     member: rhs_member,
                 },
-            ) => lhs_member == rhs_member && lhs_base.eq_in(lhs_arena, rhs_base, rhs_arena),
+            ) => lhs_member == rhs_member && lhs_base.eq_in(own_context, rhs_base, other_context),
             (Self::Parenthesized(lhs), Self::Parenthesized(rhs)) => {
-                lhs.eq_in(lhs_arena, rhs, rhs_arena)
+                lhs.eq_in(own_context, rhs, other_context)
             }
             _ => unimplemented!(),
         }
     }
 }
 
-impl<'a> Spanned for Expression<'a, spans::WithSpans> {
-    type Spanless = Expression<'a, spans::WithoutSpans>;
+impl<'a> Spanned for Expression<'a, spans::SpansPresent> {
+    type Spanless = Expression<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         match self {

@@ -1,10 +1,11 @@
-use std::{ops::Range, str::FromStr};
+use std::{mem::discriminant, ops::Range, str::FromStr};
 use strum::VariantNames;
 
 use crate::{
-    arena::Handle,
+    arena::{Arena, Handle},
     join_into_readable_list,
     spans::{self, Spanned, WithSpan},
+    EqIn,
 };
 
 use super::{expression::Expression, ParsedModule};
@@ -19,7 +20,7 @@ use super::{expression::Expression, ParsedModule};
     strum::IntoStaticStr,
 ))]
 #[strum_discriminants(name(AttributeIdentifier))]
-pub enum AttributeInner<'a, S: spans::Spanning = spans::WithSpans> {
+pub enum AttributeInner<'a, S: spans::SpanState = spans::SpansPresent> {
     #[strum_discriminants(strum(serialize = "align"))]
     Align(Handle<Expression<'a, S>>),
     #[strum_discriminants(strum(serialize = "binding"))]
@@ -111,7 +112,7 @@ impl AttributeIdentifier {
 }
 
 impl<'a> Spanned for AttributeInner<'a> {
-    type Spanless = AttributeInner<'a, spans::WithoutSpans>;
+    type Spanless = AttributeInner<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         match self {
@@ -149,9 +150,9 @@ impl<'a> Spanned for AttributeInner<'a> {
 }
 
 #[derive(Debug)]
-pub struct Attribute<'a, S: spans::Spanning = spans::WithSpans> {
+pub struct Attribute<'a, S: spans::SpanState = spans::SpansPresent> {
     /// The span of the identifier portion of the input.
-    pub identifier_span: S::Span,
+    pub identifier_span: spans::Span,
     /// The data represented by this attribute.
     pub inner: AttributeInner<'a, S>,
 }
@@ -162,10 +163,11 @@ impl<'a> Attribute<'a> {
         identifier: WithSpan<AttributeIdentifier>,
         expressions: Vec<Handle<Expression<'a>>>,
     ) -> Result<Self, Vec<WithSpan<super::ParseIssue<'a>>>> {
-        let identifier_span = identifier.span;
+        let identifier_span = identifier.span();
+        let identifier = identifier.unwrap();
 
         // Returns None if insufficient parameter expressions were given
-        fn collect_expressions<'a, S: spans::Spanning>(
+        fn collect_expressions<'a, S: spans::SpanState>(
             identifier: AttributeIdentifier,
             expressions: &mut impl Iterator<Item = Handle<Expression<'a, S>>>,
         ) -> Option<AttributeInner<'a, S>> {
@@ -200,35 +202,36 @@ impl<'a> Attribute<'a> {
             return Some(inner);
         }
 
-        let required_arg_count = identifier.inner.argument_count();
+        let required_arg_count = identifier.argument_count();
         let found_arg_count = expressions.len();
 
         // Use as many expressions as is required for this argument
         let mut expressions = expressions.into_iter();
-        let inner = collect_expressions(identifier.inner, &mut expressions).ok_or_else(|| {
-            vec![WithSpan {
-                span: identifier_span,
-                inner: super::ParseIssue::InadequateAttributeArgumentCount {
-                    attribute_ident: identifier.inner,
+        let inner = collect_expressions(identifier, &mut expressions).ok_or_else(|| {
+            vec![WithSpan::new(
+                super::ParseIssue::InadequateAttributeArgumentCount {
+                    attribute_ident: identifier,
                     minimum: required_arg_count.start,
                     found: found_arg_count,
                 },
-            }]
+                identifier_span,
+            )]
         })?;
 
         // Check we had none left
         let excess = expressions
-            .map(|expr| WithSpan {
-                span: module
+            .map(|expr| {
+                let inner = super::ParseIssue::ExcessiveAttributeArgumentCount {
+                    attribute_ident: identifier,
+                    maximum: required_arg_count.end,
+                    found: found_arg_count,
+                };
+                let span = module
                     .expressions
                     .try_get(expr)
                     .expect("handle for active module exists")
-                    .span,
-                inner: super::ParseIssue::ExcessiveAttributeArgumentCount {
-                    attribute_ident: identifier.inner,
-                    maximum: required_arg_count.end,
-                    found: found_arg_count,
-                },
+                    .span();
+                WithSpan::new(inner, span)
             })
             .collect::<Vec<_>>();
         if !excess.is_empty() {
@@ -243,12 +246,102 @@ impl<'a> Attribute<'a> {
 }
 
 impl<'a> Spanned for Attribute<'a> {
-    type Spanless = Attribute<'a, spans::WithoutSpans>;
+    type Spanless = Attribute<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         Attribute {
-            identifier_span: (),
+            identifier_span: spans::Span::empty(),
             inner: self.inner.erase_spans(),
+        }
+    }
+}
+
+impl<'a, S: spans::SpanState> EqIn<'a> for Attribute<'a, S> {
+    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        if self.identifier_span != other.identifier_span {
+            return false;
+        }
+
+        match (&self.inner, &other.inner) {
+            (AttributeInner::Align(lhs), AttributeInner::Align(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
+            (AttributeInner::Binding(lhs), AttributeInner::Binding(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
+            (AttributeInner::Builtin(lhs), AttributeInner::Builtin(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
+            (
+                AttributeInner::Diagnostic {
+                    severity: lhs_severity,
+                    trigger: lhs_trigger,
+                },
+                AttributeInner::Diagnostic {
+                    severity: rhs_severity,
+                    trigger: rhs_trigger,
+                },
+            ) => {
+                lhs_severity.eq_in(own_context, rhs_severity, other_context)
+                    && lhs_trigger.eq_in(own_context, rhs_trigger, other_context)
+            }
+            (AttributeInner::Group(lhs), AttributeInner::Group(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
+            (AttributeInner::Id(lhs), AttributeInner::Id(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
+            (
+                AttributeInner::Interpolate {
+                    inv_type: lhs_inv_type,
+                    inv_sampling: lhs_inv_sampling,
+                },
+                AttributeInner::Interpolate {
+                    inv_type: rhs_inv_type,
+                    inv_sampling: rhs_inv_sampling,
+                },
+            ) => {
+                lhs_inv_type.eq_in(own_context, rhs_inv_type, other_context)
+                    && lhs_inv_sampling.eq_in(own_context, rhs_inv_sampling, other_context)
+            }
+            (AttributeInner::Location(lhs), AttributeInner::Location(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
+            (AttributeInner::Size(lhs), AttributeInner::Size(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
+            (
+                AttributeInner::WorkgroupSize {
+                    x: lhs_x,
+                    y: lhs_y,
+                    z: lhs_z,
+                },
+                AttributeInner::WorkgroupSize {
+                    x: rhs_x,
+                    y: rhs_y,
+                    z: rhs_z,
+                },
+            ) => {
+                lhs_x.eq_in(own_context, rhs_x, other_context)
+                    && lhs_y.eq_in(own_context, rhs_y, other_context)
+                    && lhs_z.eq_in(own_context, rhs_z, other_context)
+            }
+            (AttributeInner::Const, AttributeInner::Const)
+            | (AttributeInner::Invariant, AttributeInner::Invariant)
+            | (AttributeInner::MustUse, AttributeInner::MustUse)
+            | (AttributeInner::Vertex, AttributeInner::Vertex)
+            | (AttributeInner::Fragment, AttributeInner::Fragment)
+            | (AttributeInner::Compute, AttributeInner::Compute) => true,
+
+            (lhs, rhs) if discriminant(lhs) != discriminant(rhs) => return false,
+            _ => unimplemented!(),
         }
     }
 }

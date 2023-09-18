@@ -5,6 +5,7 @@ use perfect_derive::perfect_derive;
 use crate::{
     arena::{Arena, Handle},
     spans::{self, Spanned},
+    EqIn,
 };
 
 use super::expression::Expression;
@@ -244,35 +245,32 @@ impl<'a> Deref for Ident<'a> {
 }
 
 #[perfect_derive(Debug)]
-pub struct TemplatedIdent<'a, S: spans::Spanning = spans::WithSpans> {
-    pub ident: S::Spanned<Ident<'a>>,
+pub struct TemplatedIdent<'a, S: spans::SpanState = spans::SpansPresent> {
+    pub ident: spans::WithSpan<Ident<'a>, S>,
     pub args: Vec<Handle<Expression<'a, S>>>,
 }
 
-impl<'a, S: spans::Spanning> TemplatedIdent<'a, S>
-where
-    S::Spanned<Ident<'a>>: PartialEq,
-    S::Spanned<Expression<'a, S>>: PartialEq,
-{
-    // Checks if this templated ident is equal to another, given two (possibly different) arenas of expressions.
-    pub fn eq_in(
-        &self,
-        lhs_arena: &Arena<Expression<'a, S>, S>,
-        rhs: &Self,
-        rhs_arena: &Arena<Expression<'a, S>, S>,
+impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
+    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
     ) -> bool {
-        return self.ident == rhs.ident
-            && self.args.len() == rhs.args.len()
+        return self.ident == other.ident
+            && self.args.len() == other.args.len()
             && self
                 .args
                 .iter()
-                .zip(&rhs.args)
-                .all(|(lhs, rhs)| lhs.eq_in(lhs_arena, rhs, rhs_arena));
+                .zip(&other.args)
+                .all(|(lhs, rhs)| lhs.eq_in(own_context, rhs, other_context));
     }
 }
 
-impl<'a> Spanned for TemplatedIdent<'a, spans::WithSpans> {
-    type Spanless = TemplatedIdent<'a, spans::WithoutSpans>;
+impl<'a> Spanned for TemplatedIdent<'a, spans::SpansPresent> {
+    type Spanless = TemplatedIdent<'a, spans::SpansErased>;
 
     fn erase_spans(self) -> Self::Spanless {
         TemplatedIdent {

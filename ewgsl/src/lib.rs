@@ -122,3 +122,34 @@ fn get_recommended_alternative<'a>(found: &str, alternatives: &[&'a str]) -> Opt
     }
     return min_found;
 }
+
+/// Like [`Eq`], but for objects which refer into some sort of context, such as handles into arenas.
+pub trait EqIn<'a>: 'a {
+    type Context<'b>
+    where
+        'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool;
+}
+
+impl<'a, T: EqIn<'a>> EqIn<'a> for Option<T> {
+    type Context<'b> = T::Context<'b> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        match (self, other) {
+            (None, None) => true,
+            (Some(lhs), Some(rhs)) => lhs.eq_in(own_context, rhs, other_context),
+            _ => false,
+        }
+    }
+}

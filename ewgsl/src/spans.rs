@@ -1,13 +1,7 @@
-use std::{
-    fmt::Debug,
-    hash::Hash,
-    ops::{Deref, Range},
-};
+use perfect_derive::perfect_derive;
+use std::{fmt::Debug, hash::Hash, marker::PhantomData, ops::Range};
 
-use crate::parsing::{
-    expression::{BinaryOperator, Swizzle, UnaryOperator},
-    ident::Ident,
-};
+use crate::EqIn;
 
 /// A start (inclusive) and end (exclusive) within a given string marking the location of some text of interest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -59,133 +53,104 @@ impl<'a> From<pest::Span<'a>> for Span {
     }
 }
 
-/// An object paired with a span.
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WithSpan<T> {
-    pub inner: T,
-    pub span: Span,
-}
-
-impl<T> Spanned for WithSpan<T> {
-    type Spanless = T;
-
-    fn erase_spans(self) -> Self::Spanless {
-        self.inner
-    }
-}
-
-impl<T> MaybeSpanned<T> for WithSpan<T> {
-    type Span = Span;
-    type Mapped<U> = WithSpan<U>;
-
-    fn inner(&self) -> &T {
-        &self.inner
-    }
-
-    fn inner_mut(&mut self) -> &mut T {
-        &mut self.inner
-    }
-
-    fn span(&self) -> Self::Span {
-        self.span
-    }
-
-    fn map_spanned<U>(self, f: impl FnOnce(T) -> U) -> Self::Mapped<U> {
-        WithSpan {
-            inner: f(self.inner),
-            span: self.span,
-        }
-    }
-}
-
-impl<T> AsRef<T> for WithSpan<T> {
-    fn as_ref(&self) -> &T {
-        &self.inner
-    }
-}
-
-impl<T> AsMut<T> for WithSpan<T> {
-    fn as_mut(&mut self) -> &mut T {
-        &mut self.inner
-    }
-}
-
-impl<T> Deref for WithSpan<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-/// Marker type denoting that this object carries span information with its children.
+/// Marker type denoting that this object carries valid span information with its children.
 #[derive(Debug)]
-pub struct WithSpans(());
-/// Marker type denoting that this object does not carry span information with its children.
+pub struct SpansPresent(());
+/// Marker type denoting that this object's spans have been erased.
 #[derive(Debug)]
-pub struct WithoutSpans(());
-
-/// Represents an object that may or may not carry span information about the type `T`.
-pub trait MaybeSpanned<T> {
-    /// The span information carried, or `()`.
-    type Span: PartialEq + Eq + Debug + Hash + Copy + Clone;
-    /// Another, equally spanned object but holding a different value.
-    type Mapped<U>: MaybeSpanned<U, Span = Self::Span>;
-
-    fn inner(&self) -> &T;
-    fn inner_mut(&mut self) -> &mut T;
-
-    /// Extracts just the span information from this object
-    fn span(&self) -> Self::Span;
-
-    /// Maps this possibly spanned object, preserving any span information.
-    fn map_spanned<U>(self, f: impl FnOnce(T) -> U) -> Self::Mapped<U>;
-}
-
-impl<T> MaybeSpanned<T> for T {
-    type Span = ();
-    type Mapped<U> = U;
-
-    fn inner(&self) -> &T {
-        self
-    }
-
-    fn inner_mut(&mut self) -> &mut T {
-        self
-    }
-
-    fn span(&self) -> Self::Span {
-        ()
-    }
-
-    fn map_spanned<U>(self, f: impl FnOnce(T) -> U) -> Self::Mapped<U> {
-        f(self)
-    }
-}
+pub struct SpansErased(());
 
 mod sealed {
     use super::*;
 
-    pub trait SpanPairSealed {}
-    impl SpanPairSealed for WithSpans {}
-    impl SpanPairSealed for WithoutSpans {}
+    pub trait SpanStateSealed {}
+    impl SpanStateSealed for SpansPresent {}
+    impl SpanStateSealed for SpansErased {}
 }
 
-/// Represents that either the object has span information (using the [`WithSpans`] marker type), or that it does not
-/// (using the [`WithoutSpans`] marker type).
-pub trait Spanning: sealed::SpanPairSealed + Debug {
-    type Spanned<T>: MaybeSpanned<T, Span = Self::Span>;
-    type Span: PartialEq + Eq + Debug + Hash + Copy + Clone;
+/// Represents that either the object has span information (using the [`SpansPresent`] marker type), or that the span information has been erased
+/// (using the [`SpansErased`] marker type).
+pub trait SpanState: sealed::SpanStateSealed + 'static {}
+impl SpanState for SpansPresent {}
+impl SpanState for SpansErased {}
+
+/// An object paired with a span.
+#[perfect_derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WithSpan<T, S: SpanState = SpansPresent> {
+    inner: T,
+    span: Span,
+    _state: PhantomData<S>,
 }
 
-impl Spanning for WithSpans {
-    type Spanned<T> = WithSpan<T>;
-    type Span = Span;
+impl<T, S: SpanState> WithSpan<T, S> {
+    pub fn unwrap(self) -> T {
+        self.inner
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> WithSpan<U, S> {
+        WithSpan {
+            inner: f(self.inner),
+            span: self.span,
+            _state: self._state,
+        }
+    }
 }
 
-impl Spanning for WithoutSpans {
-    type Spanned<T> = T;
-    type Span = ();
+impl<T> WithSpan<T> {
+    pub fn new(inner: T, span: Span) -> Self {
+        Self {
+            inner,
+            span,
+            _state: PhantomData,
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
+    }
+}
+
+impl<T> Spanned for WithSpan<T> {
+    type Spanless = WithSpan<T, SpansErased>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        WithSpan {
+            inner: self.inner,
+            span: Span::empty(),
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<'a, T: EqIn<'a>, S: SpanState> EqIn<'a> for WithSpan<T, S> {
+    type Context<'b> = T::Context<'b> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        self.span == other.span && self.inner.eq_in(own_context, &other.inner, other_context)
+    }
+}
+
+impl<T> From<T> for WithSpan<T, SpansErased> {
+    fn from(value: T) -> Self {
+        Self {
+            inner: value,
+            span: Span::empty(),
+            _state: PhantomData,
+        }
+    }
 }
 
 /// Indicates that an object has span information that can be stripped.
