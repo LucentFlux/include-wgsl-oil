@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::ops::{Deref, Range};
 
 use perfect_derive::perfect_derive;
 
@@ -206,7 +206,7 @@ pub enum InvalidIdentifierReason {
 
 /// Some single word without spaces or punctuation, which isn't a keyword or reserved word,
 /// and which doesn't start with "__".
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct Ident<'a>(&'a str);
 
 impl<'a> Ident<'a> {
@@ -242,10 +242,10 @@ impl<'a> Deref for Ident<'a> {
     }
 }
 
-#[perfect_derive(Debug)]
+#[perfect_derive(Debug, Clone)]
 pub struct TemplatedIdent<'a, S: spans::SpanState = spans::SpansPresent> {
     pub ident: spans::WithSpan<Ident<'a>, S>,
-    pub args: Vec<Handle<Expression<'a, S>>>,
+    pub args: Range<Handle<Expression<'a, S>>>,
 }
 
 impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
@@ -261,11 +261,13 @@ impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
             return false;
         }
 
-        if self.args.len() != other.args.len() {
+        let lhs_args = &own_context[self.args.clone()];
+        let rhs_args = &other_context[other.args.clone()];
+        if lhs_args.len() != rhs_args.len() {
             return false;
         }
 
-        for (lhs, rhs) in self.args.iter().zip(&other.args) {
+        for (lhs, rhs) in lhs_args.into_iter().zip(rhs_args) {
             if !lhs.eq_in(own_context, rhs, other_context) {
                 return false;
             }

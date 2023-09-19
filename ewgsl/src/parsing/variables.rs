@@ -76,7 +76,7 @@ impl<'a, S: spans::SpanState> EqIn<'a> for OptionallyTypedIdent<'a, S> {
 
 #[perfect_derive(Debug)]
 pub struct VariableDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub template_list: Vec<Handle<Expression<'a, S>>>,
+    pub template_list: Range<Handle<Expression<'a, S>>>,
     pub ident: OptionallyTypedIdent<'a, S>,
 }
 
@@ -101,10 +101,12 @@ impl<'a, S: spans::SpanState> EqIn<'a> for VariableDeclaration<'a, S> {
         other_context: &'b Self::Context<'b>,
     ) -> bool {
         // Templates - assume ordered
-        if self.template_list.len() != other.template_list.len() {
+        let lhs_templates = &own_context[self.template_list.clone()];
+        let rhs_templates = &other_context[other.template_list.clone()];
+        if lhs_templates.len() != rhs_templates.len() {
             return false;
         }
-        for (lhs, rhs) in self.template_list.iter().zip(&other.template_list) {
+        for (lhs, rhs) in lhs_templates.into_iter().zip(rhs_templates) {
             if !lhs.eq_in(own_context, rhs, other_context) {
                 return false;
             }

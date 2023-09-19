@@ -161,7 +161,7 @@ impl<'a> Attribute<'a> {
     pub fn try_parse_from(
         module: &ParsedModule<'a>,
         identifier: WithSpan<AttributeIdentifier>,
-        expressions: Vec<Handle<Expression<'a>>>,
+        expressions: impl IntoIterator<Item = Handle<Expression<'a>>> + ExactSizeIterator,
     ) -> Result<Self, Vec<WithSpan<super::ParseIssue<'a>>>> {
         let identifier_span = identifier.span();
         let identifier = identifier.unwrap();

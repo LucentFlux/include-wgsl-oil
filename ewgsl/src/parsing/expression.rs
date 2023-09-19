@@ -1,4 +1,4 @@
-use std::mem::discriminant;
+use std::{mem::discriminant, ops::Range};
 
 use perfect_derive::perfect_derive;
 
@@ -46,7 +46,7 @@ pub enum UnaryOperator {
     Dereference,
 }
 
-#[derive(Debug, Hash, PartialEq, Eq)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub enum Literal<'a> {
     Int(&'a str),
     Float(&'a str),
@@ -137,29 +137,39 @@ impl Swizzle {
     }
 }
 
-#[perfect_derive(Debug)]
+#[perfect_derive(Debug, Clone)]
 pub struct CallPhrase<'a, S: spans::SpanState = spans::SpansPresent> {
     pub ident: TemplatedIdent<'a, S>,
-    pub args: Vec<Handle<Expression<'a, S>>>,
+    pub args: Range<Handle<Expression<'a, S>>>,
 }
 
-impl<'a, S: spans::SpanState> CallPhrase<'a, S> {
-    // Checks if this call phrase is equal to another, given two (possibly different) arenas of expressions.
-    pub fn eq_in(
+impl<'a, S: spans::SpanState> EqIn<'a> for CallPhrase<'a, S> {
+    type Context<'b> = Arena<Expression<'a, S>, S>
+    where
+        'a: 'b;
+
+    fn eq_in(
         &self,
         lhs_arena: &Arena<Expression<'a, S>, S>,
         rhs: &Self,
         rhs_arena: &Arena<Expression<'a, S>, S>,
     ) -> bool {
-        return self.ident.eq_in(lhs_arena, &rhs.ident, rhs_arena)
-            && self.args.len() == rhs.args.len()
-            && self.args.iter().zip(&rhs.args).all(|(lhs, rhs)| {
-                match (lhs_arena.try_get(*lhs), rhs_arena.try_get(*rhs)) {
-                    (Ok(lhs), Ok(rhs)) => lhs.eq_in(lhs_arena, rhs, rhs_arena),
-                    (Err(_), Err(_)) => true,
-                    _ => false,
-                }
-            });
+        if !self.ident.eq_in(lhs_arena, &rhs.ident, rhs_arena) {
+            return false;
+        }
+
+        let lhs_args = &lhs_arena[self.args.clone()];
+        let rhs_args = &rhs_arena[rhs.args.clone()];
+        if lhs_args.len() != rhs_args.len() {
+            return false;
+        }
+        for (lhs, rhs) in lhs_args.into_iter().zip(rhs_args) {
+            if !lhs.eq_in(lhs_arena, rhs, rhs_arena) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 
@@ -206,6 +216,15 @@ pub enum Expression<'a, S: spans::SpanState = spans::SpansPresent> {
     },
     Parenthesized(Handle<Expression<'a, S>>),
 }
+
+const _: () = {
+    // Check Expression is Clone
+    fn assert_clone<T: Clone>() {}
+    fn assert_all() {
+        assert_clone::<Expression<'static, spans::SpansPresent>>();
+        assert_clone::<Expression<'static, spans::SpansErased>>();
+    }
+};
 
 impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Expression<'a, S>> {
     type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
