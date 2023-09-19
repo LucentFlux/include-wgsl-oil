@@ -38,7 +38,7 @@ IDENT_PATTERN_TOKEN = @{
 }
 IDENT               =  { IDENT_PATTERN_TOKEN }
 
-TEMPLATE_ARG_EXPRESSION = { EXPRESSION }
+TEMPLATE_ARG_EXPRESSION = { TEMPLATE_EXPRESSION }
 TEMPLATE_LIST           = {
     // MODIFICATION FROM WGSL - template lists may be empty
     "<" ~ (TEMPLATE_ARG_EXPRESSION ~ ("," ~ TEMPLATE_ARG_EXPRESSION)* ~ ","?)? ~ ">"
@@ -131,10 +131,10 @@ PAREN_EXPRESSION = {
 }
 
 PRIMARY_EXPRESSION = {
-    TEMPLATE_ELABORATED_IDENT
-  | CALL_EXPRESSION
+    CALL_EXPRESSION
   | LITERAL
   | PAREN_EXPRESSION
+  | TEMPLATE_ELABORATED_IDENT
 }
 
 RGBA_SWIZZLE_NAME = { "r" | "g" | "b" | "a" }
@@ -163,12 +163,12 @@ _PIPE                          = { "|" }
 _FORWARD_SLASH                 = { "/" }
 _PERCENT                       = { "%" }
 UNARY_EXPRESSION               = {
-    SINGULAR_EXPRESSION
-  | (_HYPHEN ~ UNARY_EXPRESSION)
+    (_HYPHEN ~ UNARY_EXPRESSION)
   | (_EXCLAMATION_MARK ~ UNARY_EXPRESSION)
   | (_TILDE ~ UNARY_EXPRESSION)
   | (_ASTERISK ~ UNARY_EXPRESSION)
   | (_AMPERSAND ~ UNARY_EXPRESSION)
+  | SINGULAR_EXPRESSION
 }
 CORE_LHS_EXPRESSION            = {
     IDENT
@@ -196,25 +196,35 @@ ADDITIVE_EXPRESSION            = {
 }
 _SHIFT_LEFT                    = { "<<" }
 _SHIFT_RIGHT                   = { ">>" }
-SHIFT_EXPRESSION               = {
+// Variant of shift expression which doesn't have imbalanced top-level `<` or `>` characters, for use in template parameters
+TEMPLATE_SHIFT_EXPRESSION = {
     ADDITIVE_EXPRESSION
-  | (UNARY_EXPRESSION ~ _SHIFT_LEFT ~ UNARY_EXPRESSION)
-  | (UNARY_EXPRESSION ~ _SHIFT_RIGHT ~ UNARY_EXPRESSION)
 }
-_LESS_THAN                     = { "<" }
-_GREATER_THAN                  = { ">" }
-_LESS_THAN_EQUAL               = { "<=" }
-_GREATER_THAN_EQUAL            = { ">=" }
-_EQUAL_TO                      = { "==" }
-_NOT_EQUAL_TO                  = { "!=" }
+SHIFT_EXPRESSION          = {
+    (UNARY_EXPRESSION ~ _SHIFT_LEFT ~ UNARY_EXPRESSION)
+  | (UNARY_EXPRESSION ~ _SHIFT_RIGHT ~ UNARY_EXPRESSION)
+  | ADDITIVE_EXPRESSION
+}
+_LESS_THAN                = { "<" }
+_GREATER_THAN             = { ">" }
+_LESS_THAN_EQUAL          = { "<=" }
+_GREATER_THAN_EQUAL       = { ">=" }
+_EQUAL_TO                 = { "==" }
+_NOT_EQUAL_TO             = { "!=" }
+// Variant of relational expression which doesn't have imbalanced top-level `<` or `>` characters, for use in template parameters
+TEMPLATE_RELATIONAL_EXPRESSION = {
+    (TEMPLATE_SHIFT_EXPRESSION ~ _EQUAL_TO ~ TEMPLATE_SHIFT_EXPRESSION)
+  | (TEMPLATE_SHIFT_EXPRESSION ~ _NOT_EQUAL_TO ~ TEMPLATE_SHIFT_EXPRESSION)
+  | TEMPLATE_SHIFT_EXPRESSION
+}
 RELATIONAL_EXPRESSION          = {
-    SHIFT_EXPRESSION
-  | (SHIFT_EXPRESSION ~ _LESS_THAN ~ SHIFT_EXPRESSION)
+    (SHIFT_EXPRESSION ~ _LESS_THAN ~ SHIFT_EXPRESSION)
   | (SHIFT_EXPRESSION ~ _GREATER_THAN ~ SHIFT_EXPRESSION)
   | (SHIFT_EXPRESSION ~ _LESS_THAN_EQUAL ~ SHIFT_EXPRESSION)
   | (SHIFT_EXPRESSION ~ _GREATER_THAN_EQUAL ~ SHIFT_EXPRESSION)
   | (SHIFT_EXPRESSION ~ _EQUAL_TO ~ SHIFT_EXPRESSION)
   | (SHIFT_EXPRESSION ~ _NOT_EQUAL_TO ~ SHIFT_EXPRESSION)
+  | SHIFT_EXPRESSION
 }
 _UPTICK                        = { "^" }
 BITWISE_EXPRESSION             = {
@@ -222,10 +232,20 @@ BITWISE_EXPRESSION             = {
 }
 _DOUBLE_AND                    = { "&&" }
 _DOUBLE_OR                     = { "||" }
-SHORT_CIRCUIT_EXPRESSION       = {
+// Variant of short circuit expression which doesn't have imbalanced top-level `<` or `>` characters, for use in template parameters
+TEMPLATE_SHORT_CIRCUIT_EXPRESSION = {
+    TEMPLATE_RELATIONAL_EXPRESSION ~ ((_DOUBLE_OR ~ TEMPLATE_RELATIONAL_EXPRESSION)+ | (_DOUBLE_AND ~ TEMPLATE_RELATIONAL_EXPRESSION)+)
+}
+SHORT_CIRCUIT_EXPRESSION          = {
     RELATIONAL_EXPRESSION ~ ((_DOUBLE_OR ~ RELATIONAL_EXPRESSION)+ | (_DOUBLE_AND ~ RELATIONAL_EXPRESSION)+)
 }
-EXPRESSION                     = {
+// Variant of expression which doesn't have imbalanced top-level `<` or `>` characters, for use in template parameters
+TEMPLATE_EXPRESSION = {
+    BITWISE_EXPRESSION
+  | TEMPLATE_SHORT_CIRCUIT_EXPRESSION
+  | TEMPLATE_RELATIONAL_EXPRESSION
+}
+EXPRESSION          = {
     BITWISE_EXPRESSION
   | SHORT_CIRCUIT_EXPRESSION
   | RELATIONAL_EXPRESSION

@@ -113,13 +113,16 @@ impl Display for parser::Rule {
             parser::Rule::_SHIFT_LEFT => "`<<`",
             parser::Rule::_SHIFT_RIGHT => "`>>`",
             parser::Rule::SHIFT_EXPRESSION => "shift expression",
+            parser::Rule::TEMPLATE_SHIFT_EXPRESSION => "template shift expression",
             parser::Rule::_LESS_THAN => "`<`",
             parser::Rule::_GREATER_THAN => "`>`",
             parser::Rule::_LESS_THAN_EQUAL => "`<=`",
             parser::Rule::_GREATER_THAN_EQUAL => "`>=`",
             parser::Rule::RELATIONAL_EXPRESSION => "relational expression",
+            parser::Rule::TEMPLATE_RELATIONAL_EXPRESSION => "template relational expression",
             parser::Rule::BITWISE_EXPRESSION => "bitwise expression",
             parser::Rule::EXPRESSION => "expression",
+            parser::Rule::TEMPLATE_EXPRESSION => "template expression",
             parser::Rule::COMPOUND_STATEMENT => "compound statement",
             parser::Rule::ASSIGNMENT_STATEMENT => "assignment statement",
             parser::Rule::COMPOUND_ASSIGNMENT_OPERATOR => "compound assignment operator",
@@ -178,6 +181,9 @@ impl Display for parser::Rule {
             parser::Rule::_DOUBLE_OR => "`||`",
             parser::Rule::_UPTICK => "`^`",
             parser::Rule::SHORT_CIRCUIT_EXPRESSION => "short circuit (binary) expression",
+            parser::Rule::TEMPLATE_SHORT_CIRCUIT_EXPRESSION => {
+                "template short circuit (binary) expression"
+            }
             parser::Rule::VAR_KEYWORD => "`var` keyword",
             parser::Rule::LET_KEYWORD => "`let` keyword",
             parser::Rule::IF_KEYWORD => "`if` keyword",
@@ -1336,7 +1342,10 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
     ) -> Result<Handle<Expression<'a>>, ()> {
-        debug_assert_eq!(expression.as_rule(), parser::Rule::SHORT_CIRCUIT_EXPRESSION);
+        debug_assert!(
+            expression.as_rule() == parser::Rule::SHORT_CIRCUIT_EXPRESSION
+                || expression.as_rule() == parser::Rule::TEMPLATE_SHORT_CIRCUIT_EXPRESSION
+        );
 
         Self::parse_iterated_binary_expression(
             module,
@@ -1400,7 +1409,10 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
     ) -> Result<Handle<Expression<'a>>, ()> {
-        debug_assert_eq!(expression.as_rule(), parser::Rule::SHIFT_EXPRESSION);
+        debug_assert!(
+            expression.as_rule() == parser::Rule::SHIFT_EXPRESSION
+                || expression.as_rule() == parser::Rule::TEMPLATE_SHIFT_EXPRESSION
+        );
         let expression_span = expression.as_span().into();
 
         let mut inner = expression.into_inner();
@@ -1442,7 +1454,10 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
     ) -> Result<Handle<Expression<'a>>, ()> {
-        debug_assert_eq!(expression.as_rule(), parser::Rule::RELATIONAL_EXPRESSION);
+        debug_assert!(
+            expression.as_rule() == parser::Rule::RELATIONAL_EXPRESSION
+                || expression.as_rule() == parser::Rule::TEMPLATE_RELATIONAL_EXPRESSION
+        );
 
         Self::parse_singular_binary_expression(
             module,
@@ -1466,14 +1481,20 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
     ) -> Result<Handle<Expression<'a>>, ()> {
-        debug_assert_eq!(expression.as_rule(), parser::Rule::EXPRESSION);
+        debug_assert!(
+            expression.as_rule() == parser::Rule::EXPRESSION
+                || expression.as_rule() == parser::Rule::TEMPLATE_EXPRESSION
+        );
 
         Self::parse_switch_expression(module, issues, expression, |rule| match rule {
             parser::Rule::BITWISE_EXPRESSION => Box::new(Self::parse_bitwise_expression),
-            parser::Rule::SHORT_CIRCUIT_EXPRESSION => {
+            parser::Rule::SHORT_CIRCUIT_EXPRESSION
+            | parser::Rule::TEMPLATE_SHORT_CIRCUIT_EXPRESSION => {
                 Box::new(Self::parse_short_circuit_expression)
             }
-            parser::Rule::RELATIONAL_EXPRESSION => Box::new(Self::parse_relational_expression),
+            parser::Rule::RELATIONAL_EXPRESSION | parser::Rule::TEMPLATE_RELATIONAL_EXPRESSION => {
+                Box::new(Self::parse_relational_expression)
+            }
             _ => unreachable!(),
         })
     }
@@ -1849,29 +1870,49 @@ where
         if self.directives != other.directives {
             return false;
         }
+        // Search through globals, checking each global is in both modules
         if self.global_variables.len() != other.global_variables.len() {
             return false;
         }
-        // Search through globals by name, checking each named global is in both modules
-        for (_, lhs) in self.global_variables.iter() {
-            let name = lhs.inner().name();
-            let rhs = other
-                .global_variables
-                .iter()
-                .find(|(_, rhs)| rhs.inner().name() == name);
-
-            let (_, rhs) = match rhs {
-                None => return false,
-                Some(rhs) => rhs,
-            };
-
-            if !lhs.eq_in(
-                &(&self.attributes, &self.expressions),
-                rhs,
-                &(&other.attributes, &other.expressions),
-            ) {
-                return false;
+        'outer: for (_, lhs) in self.global_variables.iter() {
+            for (_, rhs) in other.global_variables.iter() {
+                if lhs.eq_in(
+                    &(&self.attributes, &self.expressions),
+                    rhs,
+                    &(&other.attributes, &other.expressions),
+                ) {
+                    continue 'outer;
+                }
             }
+            return false;
+        }
+        // Search through constants, checking each constant is in both modules
+        if self.constants.len() != other.constants.len() {
+            return false;
+        }
+        'outer: for (_, lhs) in self.constants.iter() {
+            for (_, rhs) in other.constants.iter() {
+                if lhs.eq_in(&self.expressions, rhs, &other.expressions) {
+                    continue 'outer;
+                }
+            }
+            return false;
+        }
+        // Search through overrides, checking each override is in both modules
+        if self.overrides.len() != other.overrides.len() {
+            return false;
+        }
+        'outer: for (_, lhs) in self.overrides.iter() {
+            for (_, rhs) in other.overrides.iter() {
+                if lhs.eq_in(
+                    &(&self.attributes, &self.expressions),
+                    rhs,
+                    &(&other.attributes, &other.expressions),
+                ) {
+                    continue 'outer;
+                }
+            }
+            return false;
         }
 
         return true;
@@ -1884,6 +1925,7 @@ mod tests {
     use crate::spans::Span;
 
     use super::{
+        expression::CallPhrase,
         variables::{OptionallyTypedIdent, TypeSpecifier, VariableDeclaration},
         *,
     };
@@ -1920,9 +1962,15 @@ mod tests {
     #[case("@group var v: u32;")]
     #[case("@group(1, 2) var v: u32;")]
     #[case("@const(3) var v: u32;")]
+    #[case("@var var v: u32;")]
     #[case("var<,> bar: u32 = 1 + 2;")]
     #[case("var<a,,> bar: u32;")]
     // Invalid constants
+    #[case("const bar: u32;")]
+    #[case("const bar: u32 =;")]
+    #[case("const bar: vec2<bool = vec2(false, true);")]
+    #[case("const bar: vec2<bool> vec2(false, true);")]
+    #[case("const bar = 12")]
     fn parse_invalid_fails(#[case] invalid: &str) {
         assert!(
             ParsedModule::parse("invalid_module_test.ewgsl", invalid).is_err(),
@@ -1969,6 +2017,36 @@ mod tests {
             res1.erase_spans(),
             res2.erase_spans(),
             "`{}` and `{}` parsed differently",
+            src1,
+            src2
+        )
+    }
+
+    fn assert_parse_as_different<'a>(src1: &'a str, src2: &'a str) {
+        let res1 = ParsedModule::parse("valid_module_test_1.ewgsl", src1);
+        let res1 = match res1 {
+            Err(e) => panic!(
+                "`{}` was a valid module, but parsed as invalid: {}",
+                src1,
+                e.diagnostics()
+            ),
+            Ok(res) => res,
+        };
+
+        let res2 = ParsedModule::parse("valid_module_test_2.ewgsl", src2);
+        let res2 = match res2 {
+            Err(e) => panic!(
+                "`{}` was a valid module, but parsed as invalid: {}",
+                src2,
+                e.diagnostics()
+            ),
+            Ok(res) => res,
+        };
+
+        assert_ne!(
+            res1.erase_spans(),
+            res2.erase_spans(),
+            "`{}` and `{}` parsed as the same, but should be different",
             src1,
             src2
         )
@@ -2137,11 +2215,100 @@ mod tests {
         assert_parse_valid_succeeds(src, expected_module)
     }
     #[test]
-    fn parse_valid_same_case_global_var_02() {
+    fn parse_valid_succeeds_case_global_var_02() {
+        let src = "@must_use var<private> bar: array<u32, 4> = array<u32, 4>(1,1,2,3);";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let u32_arg = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("u32").unwrap().into(),
+                    args: vec![],
+                },
+            }
+            .into(),
+        );
+        let one = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("1"),
+            }
+            .into(),
+        );
+        let two = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("2"),
+            }
+            .into(),
+        );
+        let three = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("3"),
+            }
+            .into(),
+        );
+        let four = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("4"),
+            }
+            .into(),
+        );
+
+        let private_arg = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("private").unwrap().into(),
+                    args: vec![],
+                },
+            }
+            .into(),
+        );
+
+        let must_use_attr = expected_module.attributes.append(
+            Attribute {
+                identifier_span: Span::empty(),
+                inner: attributes::AttributeInner::MustUse,
+            }
+            .into(),
+        );
+
+        let rhs = expected_module.expressions.append(
+            Expression::Call(CallPhrase {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("array").unwrap().into(),
+                    args: vec![u32_arg.into(), four.into()],
+                },
+                args: vec![one.into(), one.into(), two.into(), three.into()],
+            })
+            .into(),
+        );
+
+        expected_module.global_variables.append(
+            GlobalVariableDeclaration {
+                attributes: must_use_attr..must_use_attr.exclusive(),
+                decl: VariableDeclaration {
+                    template_list: vec![private_arg],
+                    ident: OptionallyTypedIdent {
+                        ident: Ident::try_parse("bar").unwrap().into(),
+                        ty: Some(TypeSpecifier(TemplatedIdent {
+                            ident: Ident::try_parse("array").unwrap().into(),
+                            args: vec![u32_arg.into(), four.into()],
+                        })),
+                    },
+                }
+                .into(),
+                init: Some(rhs),
+            }
+            .into(),
+        );
+
+        assert_parse_valid_succeeds(src, expected_module)
+    }
+    #[test]
+    fn parse_valid_same_case_global_var_01() {
         assert_parse_as_same("var<> foo: u32;", "\nvar   foo : u32 ; ")
     }
     #[test]
-    fn parse_valid_same_case_global_var_03() {
+    fn parse_valid_same_case_global_var_02() {
         assert_parse_as_same(
             r"
                 @group(0) @binding(0) var<storage> foo: array<f32>;
@@ -2154,5 +2321,80 @@ mod tests {
                     vec3<u32>;
             ",
         )
+    }
+    #[test]
+    fn parse_valid_same_case_global_var_03() {
+        assert_parse_as_same(
+            r"
+                var<private> foo: vec3<u32> = vec3<u32>(1, 2, 3);
+                var<private> bar: bool = 13 < 4;
+            ",
+            r"
+                var<private> bar: bool = 13 < 4;
+                var<private> foo: vec3<u32> = vec3<u32>(1, 2, 3);
+            ",
+        )
+    }
+
+    #[test]
+    fn parse_valid_succeeds_case_global_const_01() {
+        let src = "const v: vec2<u32> = vec2(0, 0);";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let u32_arg = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("u32").unwrap().into(),
+                    args: vec![],
+                },
+            }
+            .into(),
+        );
+
+        let zero = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("0"),
+            }
+            .into(),
+        );
+        let rhs = expected_module.expressions.append(
+            Expression::Call(CallPhrase {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("vec2").unwrap().into(),
+                    args: vec![],
+                },
+                args: vec![zero.into(), zero.into()],
+            })
+            .into(),
+        );
+
+        expected_module.constants.append(
+            GlobalConstantDeclaration {
+                decl: OptionallyTypedIdent {
+                    ident: Ident::try_parse("v").unwrap().into(),
+                    ty: Some(TypeSpecifier(TemplatedIdent {
+                        ident: Ident::try_parse("vec2").unwrap().into(),
+                        args: vec![u32_arg.into()],
+                    })),
+                }
+                .into(),
+                init: rhs,
+            }
+            .into(),
+        );
+
+        assert_parse_valid_succeeds(src, expected_module)
+    }
+    #[test]
+    fn parse_valid_same_case_global_const_01() {
+        assert_parse_as_same("const foo = 3;", "\nconst //my foo var\nfoo = 3 ; ")
+    }
+    #[test]
+    fn parse_valid_different_case_global_const_01() {
+        assert_parse_as_different("const foo = 3;", "const foo = 4;")
+    }
+    #[test]
+    fn parse_valid_different_case_global_const_02() {
+        assert_parse_as_different("const foo = 3;", "const bar = 3;")
     }
 }

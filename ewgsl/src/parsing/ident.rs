@@ -267,7 +267,6 @@ impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
 
         for (lhs, rhs) in self.args.iter().zip(&other.args) {
             if !lhs.eq_in(own_context, rhs, other_context) {
-                panic!("{lhs:?} != {rhs:?} in \n{own_context:#?} and \n{other_context:#?}");
                 return false;
             }
         }
