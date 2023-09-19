@@ -1,3 +1,4 @@
+pub mod alias;
 pub mod attributes;
 pub mod directives;
 pub mod expression;
@@ -6,7 +7,7 @@ pub mod variables;
 
 use crate::{
     arena::{self, empty_handle_range, Arena, Handle, HandleRange},
-    parsing::variables::GlobalVariableDeclaration,
+    parsing::{alias::TypeAliasDeclaration, variables::GlobalVariableDeclaration},
     spans::{self, Spanned, WithSpan},
     EqIn,
 };
@@ -543,6 +544,7 @@ pub struct ParsedModule<'a, S: spans::SpanState = spans::SpansPresent> {
     pub global_variables: Arena<GlobalVariableDeclaration<'a, S>, S>,
     pub constants: Arena<GlobalConstantDeclaration<'a, S>, S>,
     pub overrides: Arena<GlobalOverrideDeclaration<'a, S>, S>,
+    pub aliases: Arena<TypeAliasDeclaration<'a, S>, S>,
 }
 
 impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
@@ -555,6 +557,7 @@ impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
             global_variables: Arena::new(),
             constants: Arena::new(),
             overrides: Arena::new(),
+            aliases: Arena::new(),
         }
     }
 }
@@ -1783,18 +1786,45 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     fn parse_type_alias_decl(
         module: &mut ParsedModule<'a>,
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
-        type_alias_decl: Pair<'_, parser::Rule>,
+        type_alias_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(type_alias_decl.as_rule(), parser::Rule::TYPE_ALIAS_DECL);
+        let alias_span = type_alias_decl.as_span().into();
 
-        todo!()
+        let mut inner = type_alias_decl.into_inner();
+
+        debug_assert_eq!(inner.next().unwrap().as_rule(), parser::Rule::ALIAS_KEYWORD);
+
+        let lhs = inner.next().unwrap();
+        let lhs = Self::parse_ident(module, issues, lhs);
+
+        let rhs = inner.next().unwrap();
+        let rhs = Self::parse_type_specifier(module, issues, rhs);
+
+        debug_assert!(inner.next().is_none());
+
+        let lhs = match lhs {
+            Ok(lhs) => lhs,
+            Err(()) => return,
+        };
+        let rhs = match rhs {
+            Ok(rhs) => rhs,
+            Err(()) => return,
+        };
+
+        let alias_decl = TypeAliasDeclaration {
+            ident: lhs,
+            ty: rhs,
+        };
+
+        module.aliases.append(WithSpan::new(alias_decl, alias_span));
     }
 
     // Struct declarations use the `struct` keyword.
     fn parse_struct_decl(
         module: &mut ParsedModule<'a>,
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
-        struct_decl: Pair<'_, parser::Rule>,
+        struct_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(struct_decl.as_rule(), parser::Rule::STRUCT_DECL);
 
@@ -1805,7 +1835,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     fn parse_function_decl(
         module: &mut ParsedModule<'a>,
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
-        function_decl: Pair<'_, parser::Rule>,
+        function_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(function_decl.as_rule(), parser::Rule::FUNCTION_DECL);
 
@@ -1816,7 +1846,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     fn parse_const_assert_decl(
         module: &mut ParsedModule<'a>,
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
-        const_assert_decl: Pair<'_, parser::Rule>,
+        const_assert_decl: Pair<'a, parser::Rule>,
     ) {
         assert_eq!(
             const_assert_decl.as_rule(),
@@ -1852,6 +1882,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 .map(|gv| gv.erase_spans()),
             constants: self.constants.erase_spans().map(|gv| gv.erase_spans()),
             overrides: self.overrides.erase_spans().map(|gv| gv.erase_spans()),
+            aliases: self.aliases.erase_spans().map(|alias| alias.erase_spans()),
         }
     }
 }
@@ -1914,6 +1945,18 @@ where
             }
             return false;
         }
+        // Search through aliases, checking each alias is in both modules
+        if self.aliases.len() != other.aliases.len() {
+            return false;
+        }
+        'outer: for (_, lhs) in self.aliases.iter() {
+            for (_, rhs) in other.aliases.iter() {
+                if lhs.eq_in(&self.expressions, rhs, &other.expressions) {
+                    continue 'outer;
+                }
+            }
+            return false;
+        }
 
         return true;
     }
@@ -1971,6 +2014,12 @@ mod tests {
     #[case("const bar: vec2<bool = vec2(false, true);")]
     #[case("const bar: vec2<bool> vec2(false, true);")]
     #[case("const bar = 12")]
+    // Invalid aliases
+    #[case("alias foo: u32;")]
+    #[case("alias bar = u32 =;")]
+    #[case("alias bar = vec2<bool;")]
+    #[case("alias bar;")]
+    #[case("alias bar = u32")]
     fn parse_invalid_fails(#[case] invalid: &str) {
         assert!(
             ParsedModule::parse("invalid_module_test.ewgsl", invalid).is_err(),
@@ -2396,5 +2445,118 @@ mod tests {
     #[test]
     fn parse_valid_different_case_global_const_02() {
         assert_parse_as_different("const foo = 3;", "const bar = 3;")
+    }
+    #[test]
+    fn parse_valid_different_case_global_const_03() {
+        assert_parse_as_different("const foo = 3;", "const foo = 3.0;")
+    }
+
+    #[test]
+    fn parse_valid_succeeds_case_global_override_01() {
+        let src = "@id(1) override is_something = false;";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let one = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("1"),
+            }
+            .into(),
+        );
+        let attr = expected_module.attributes.append(
+            Attribute {
+                identifier_span: Span::empty(),
+                inner: attributes::AttributeInner::Id(one),
+            }
+            .into(),
+        );
+
+        let rhs = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Boolean(false),
+            }
+            .into(),
+        );
+
+        expected_module.overrides.append(
+            GlobalOverrideDeclaration {
+                attributes: attr..attr.exclusive(),
+                decl: OptionallyTypedIdent {
+                    ident: Ident::try_parse("is_something").unwrap().into(),
+                    ty: None,
+                }
+                .into(),
+                init: Some(rhs),
+            }
+            .into(),
+        );
+
+        assert_parse_valid_succeeds(src, expected_module)
+    }
+    #[test]
+    fn parse_valid_same_case_global_override_01() {
+        assert_parse_as_same("override foo = 3;", "\noverride //my foo var\nfoo = 3 ; ")
+    }
+    #[test]
+    fn parse_valid_different_case_global_override_01() {
+        assert_parse_as_different("override foo = 3;", "override foo = 4;")
+    }
+    #[test]
+    fn parse_valid_different_case_global_override_02() {
+        assert_parse_as_different("@id(1) override foo = 3;", "@id(0) override foo = 3;")
+    }
+    #[test]
+    fn parse_valid_different_case_global_override_03() {
+        assert_parse_as_different(
+            "@id(1) override foo = 3;",
+            "@id(1) override foo = 3; const foo = 3.0;",
+        );
+    }
+    #[test]
+    fn parse_valid_different_case_global_override_04() {
+        assert_parse_as_different(
+            "@id(1) override foo = 3; const foo = 3.0;",
+            "@id(1) override foo = 3;",
+        );
+    }
+
+    #[test]
+    fn parse_valid_succeeds_case_global_alias_01() {
+        let src = "alias MyAlias = vec3<u32>;";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let u32_attr = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("u32").unwrap().into(),
+                    args: vec![],
+                },
+            }
+            .into(),
+        );
+
+        expected_module.aliases.append(
+            TypeAliasDeclaration {
+                ident: Ident::try_parse("MyAlias").unwrap().into(),
+                ty: TypeSpecifier(TemplatedIdent {
+                    ident: Ident::try_parse("vec3").unwrap().into(),
+                    args: vec![u32_attr],
+                }),
+            }
+            .into(),
+        );
+
+        assert_parse_valid_succeeds(src, expected_module)
+    }
+    #[test]
+    fn parse_valid_same_case_global_alias_01() {
+        assert_parse_as_same("alias foo = bar;", "\t\t\talias \n\n\n\n\nfoo = bar;;;;;")
+    }
+    #[test]
+    fn parse_valid_different_case_global_alias_01() {
+        assert_parse_as_different("alias foo = bar;", "alias bar = foo;");
+    }
+    #[test]
+    fn parse_valid_different_case_global_alias_02() {
+        assert_parse_as_different("alias foo = vec3<u32>;", "alias foo = vec3<f32>;");
     }
 }
