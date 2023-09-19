@@ -4,7 +4,7 @@ use std::{fmt::Debug, hash::Hash, marker::PhantomData, ops::Range};
 use crate::EqIn;
 
 /// A start (inclusive) and end (exclusive) within a given string marking the location of some text of interest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span {
     start: usize,
     end: usize,
@@ -53,6 +53,19 @@ impl<'a> From<pest::Span<'a>> for Span {
     }
 }
 
+impl Debug for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.start == 0 && self.end == 0 {
+            f.write_str("EmptySpan")
+        } else {
+            f.debug_struct("Span")
+                .field("start", &self.start)
+                .field("end", &self.end)
+                .finish()
+        }
+    }
+}
+
 /// Marker type denoting that this object carries valid span information with its children.
 #[derive(Debug)]
 pub struct SpansPresent(());
@@ -70,12 +83,18 @@ mod sealed {
 
 /// Represents that either the object has span information (using the [`SpansPresent`] marker type), or that the span information has been erased
 /// (using the [`SpansErased`] marker type).
-pub trait SpanState: sealed::SpanStateSealed + 'static {}
-impl SpanState for SpansPresent {}
-impl SpanState for SpansErased {}
+pub trait SpanState: sealed::SpanStateSealed + 'static {
+    const SPANS_PRESENT: bool;
+}
+impl SpanState for SpansPresent {
+    const SPANS_PRESENT: bool = true;
+}
+impl SpanState for SpansErased {
+    const SPANS_PRESENT: bool = false;
+}
 
 /// An object paired with a span.
-#[perfect_derive(Debug, Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[perfect_derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WithSpan<T, S: SpanState = SpansPresent> {
     inner: T,
     span: Span,
@@ -149,6 +168,19 @@ impl<T> From<T> for WithSpan<T, SpansErased> {
             inner: value,
             span: Span::empty(),
             _state: PhantomData,
+        }
+    }
+}
+
+impl<T: Debug, S: SpanState> Debug for WithSpan<T, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if S::SPANS_PRESENT {
+            f.debug_struct("WithSpan")
+                .field("inner", &self.inner)
+                .field("span", &self.span)
+                .finish()
+        } else {
+            self.inner.fmt(f)
         }
     }
 }

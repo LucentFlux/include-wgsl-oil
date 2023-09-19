@@ -218,8 +218,22 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Expression<'a, S>> {
     ) -> bool {
         match (own_context.try_get(*self), other_context.try_get(*other)) {
             (Ok(lhs), Ok(rhs)) => lhs.eq_in(own_context, rhs, other_context),
-            (Err(_), Err(_)) => true,
-            _ => false,
+            (lhs, rhs) => {
+                debug_assert!(
+                    lhs.is_ok(),
+                    "got invalid lhs handle {:?} in arena {:#?}",
+                    self,
+                    own_context
+                );
+                debug_assert!(
+                    rhs.is_ok(),
+                    "got invalid rhs handle {:?} in arena {:#?}",
+                    other,
+                    other_context
+                );
+
+                false
+            }
         }
     }
 }

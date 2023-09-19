@@ -1855,7 +1855,7 @@ where
         // Search through globals by name, checking each named global is in both modules
         for (_, lhs) in self.global_variables.iter() {
             let name = lhs.inner().name();
-            let rhs = self
+            let rhs = other
                 .global_variables
                 .iter()
                 .find(|(_, rhs)| rhs.inner().name() == name);
@@ -1881,6 +1881,8 @@ impl<'a, S: spans::SpanState> Eq for ParsedModule<'a, S> where Self: PartialEq {
 
 #[cfg(test)]
 mod tests {
+    use crate::spans::Span;
+
     use super::{
         variables::{OptionallyTypedIdent, TypeSpecifier, VariableDeclaration},
         *,
@@ -1941,12 +1943,12 @@ mod tests {
                 valid,
                 e.diagnostics()
             ),
-            Ok(res) => assert_eq!(
-                res.erase_spans(),
-                expected,
-                "`{}` parsed incorrectly",
-                valid
-            ),
+            Ok(res) => {
+                let no_spans = res.erase_spans();
+                if no_spans != expected {
+                    panic!("{no_spans:#?} != {expected:#?}\nShader `{valid}` parsed incorrectly")
+                }
+            }
         }
     }
 
@@ -2063,27 +2065,76 @@ mod tests {
 
     #[test]
     fn parse_valid_succeeds_case_global_var_01() {
-        assert_parse_valid_succeeds(
-            "var foo: u32;",
-            ParsedModule::<spans::SpansErased> {
-                global_variables: arena![GlobalVariableDeclaration {
-                    attributes: arena::empty_handle_range(),
-                    decl: VariableDeclaration {
-                        template_list: vec![],
-                        ident: OptionallyTypedIdent {
-                            ident: Ident::try_parse("foo").unwrap().into(),
-                            ty: Some(TypeSpecifier(TemplatedIdent {
-                                ident: Ident::try_parse("u32").unwrap().into(),
-                                args: vec![]
-                            }))
-                        }
-                    }
-                    .into(),
-                    init: None
-                }],
-                ..ParsedModule::default()
-            },
-        )
+        let src = "@group(0) @binding(0) var<storage> foo: array<vec3<f32>>;";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let f32_arg = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("f32").unwrap().into(),
+                    args: vec![],
+                },
+            }
+            .into(),
+        );
+        let vec_arg = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("vec3").unwrap().into(),
+                    args: vec![f32_arg.into()],
+                },
+            }
+            .into(),
+        );
+        let storage_arg = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("storage").unwrap().into(),
+                    args: vec![],
+                },
+            }
+            .into(),
+        );
+        let zero = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("0"),
+            }
+            .into(),
+        );
+        let attr1 = expected_module.attributes.append(
+            Attribute {
+                identifier_span: Span::empty(),
+                inner: attributes::AttributeInner::Group(zero),
+            }
+            .into(),
+        );
+        let attr2 = expected_module.attributes.append(
+            Attribute {
+                identifier_span: Span::empty(),
+                inner: attributes::AttributeInner::Binding(zero),
+            }
+            .into(),
+        );
+        expected_module.global_variables.append(
+            GlobalVariableDeclaration {
+                attributes: attr1..attr2.exclusive(),
+                decl: VariableDeclaration {
+                    template_list: vec![storage_arg],
+                    ident: OptionallyTypedIdent {
+                        ident: Ident::try_parse("foo").unwrap().into(),
+                        ty: Some(TypeSpecifier(TemplatedIdent {
+                            ident: Ident::try_parse("array").unwrap().into(),
+                            args: vec![vec_arg.into()],
+                        })),
+                    },
+                }
+                .into(),
+                init: None,
+            }
+            .into(),
+        );
+
+        assert_parse_valid_succeeds(src, expected_module)
     }
     #[test]
     fn parse_valid_same_case_global_var_02() {

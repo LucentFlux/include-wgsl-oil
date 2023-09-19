@@ -207,9 +207,7 @@ pub enum InvalidIdentifierReason {
 /// Some single word without spaces or punctuation, which isn't a keyword or reserved word,
 /// and which doesn't start with "__".
 #[derive(Debug, Hash, PartialEq, Eq)]
-pub struct Ident<'a> {
-    ident: &'a str,
-}
+pub struct Ident<'a>(&'a str);
 
 impl<'a> Ident<'a> {
     pub fn try_parse(ident: &'a str) -> Result<Self, InvalidIdentifierReason> {
@@ -226,13 +224,13 @@ impl<'a> Ident<'a> {
             return Err(InvalidIdentifierReason::WasReservedWord);
         }
 
-        return Ok(Self { ident: ident });
+        return Ok(Self(ident));
     }
 }
 
 impl<'a> AsRef<str> for Ident<'a> {
     fn as_ref(&self) -> &str {
-        self.ident
+        self.0
     }
 }
 
@@ -240,7 +238,7 @@ impl<'a> Deref for Ident<'a> {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        self.ident
+        self.0
     }
 }
 
@@ -259,13 +257,22 @@ impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
         other: &'b Self,
         other_context: &'b Self::Context<'b>,
     ) -> bool {
-        return self.ident == other.ident
-            && self.args.len() == other.args.len()
-            && self
-                .args
-                .iter()
-                .zip(&other.args)
-                .all(|(lhs, rhs)| lhs.eq_in(own_context, rhs, other_context));
+        if self.ident != other.ident {
+            return false;
+        }
+
+        if self.args.len() != other.args.len() {
+            return false;
+        }
+
+        for (lhs, rhs) in self.args.iter().zip(&other.args) {
+            if !lhs.eq_in(own_context, rhs, other_context) {
+                panic!("{lhs:?} != {rhs:?} in \n{own_context:#?} and \n{other_context:#?}");
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 
