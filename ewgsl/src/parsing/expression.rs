@@ -235,25 +235,36 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Expression<'a, S>> {
         other: &'b Self,
         other_context: &'b Self::Context<'b>,
     ) -> bool {
-        match (own_context.try_get(*self), other_context.try_get(*other)) {
-            (Ok(lhs), Ok(rhs)) => lhs.eq_in(own_context, rhs, other_context),
-            (lhs, rhs) => {
-                debug_assert!(
-                    lhs.is_ok(),
-                    "got invalid lhs handle {:?} in arena {:#?}",
-                    self,
-                    own_context
-                );
-                debug_assert!(
-                    rhs.is_ok(),
-                    "got invalid rhs handle {:?} in arena {:#?}",
-                    other,
-                    other_context
-                );
+        let lhs = &own_context[*self];
+        let rhs = &other_context[*other];
+        return lhs.eq_in(own_context, rhs, other_context);
+    }
+}
 
-                false
+impl<'a, S: spans::SpanState> EqIn<'a> for Range<Handle<Expression<'a, S>>> {
+    type Context<'b> = Arena<Expression<'a, S>, S>
+    where
+        'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        let lhs_args = &own_context[self.clone()];
+        let rhs_args = &other_context[other.clone()];
+        if lhs_args.len() != rhs_args.len() {
+            return false;
+        }
+
+        for (lhs, rhs) in lhs_args.into_iter().zip(rhs_args) {
+            if !lhs.eq_in(own_context, rhs, other_context) {
+                return false;
             }
         }
+
+        return true;
     }
 }
 

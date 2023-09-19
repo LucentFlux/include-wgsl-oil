@@ -1,5 +1,6 @@
 pub mod alias;
 pub mod attributes;
+pub mod const_assert;
 pub mod directives;
 pub mod expression;
 pub mod ident;
@@ -34,6 +35,7 @@ use thiserror::Error;
 
 use self::{
     attributes::{Attribute, AttributeIdentifier},
+    const_assert::ConstAssertStatement,
     expression::Expression,
     ident::{Ident, TemplatedIdent},
     structs::{StructDeclaration, StructMember},
@@ -544,6 +546,7 @@ pub enum GlobalDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
     Override(GlobalOverrideDeclaration<'a, S>),
     Alias(TypeAliasDeclaration<'a, S>),
     Struct(StructDeclaration<'a, S>),
+    ConstAssert(ConstAssertStatement<'a, S>),
 }
 
 impl<'a> Spanned for GlobalDeclaration<'a> {
@@ -556,6 +559,7 @@ impl<'a> Spanned for GlobalDeclaration<'a> {
             GlobalDeclaration::Override(o) => GlobalDeclaration::Override(o.erase_spans()),
             GlobalDeclaration::Alias(a) => GlobalDeclaration::Alias(a.erase_spans()),
             GlobalDeclaration::Struct(s) => GlobalDeclaration::Struct(s.erase_spans()),
+            GlobalDeclaration::ConstAssert(s) => GlobalDeclaration::ConstAssert(s.erase_spans()),
         }
     }
 }
@@ -597,6 +601,9 @@ impl<'a, S: spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
                 rhs,
                 &(other_context.0, other_context.1, other_context.2),
             ),
+            (GlobalDeclaration::ConstAssert(lhs), GlobalDeclaration::ConstAssert(rhs)) => {
+                lhs.eq_in(own_context.1, rhs, other_context.1)
+            }
             _ => unreachable!(),
         }
     }
@@ -1179,7 +1186,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     }
 
     fn parse_literal_expression(
-        module: &mut ParsedModule<'a>,
+        _module: &mut ParsedModule<'a>,
         _issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
     ) -> Result<WithSpan<Expression<'a>>, ()> {
@@ -2004,8 +2011,29 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             const_assert_decl.as_rule(),
             parser::Rule::CONST_ASSERT_STATEMENT
         );
+        let const_assert_span = const_assert_decl.as_span().into();
 
-        todo!()
+        let mut inner = const_assert_decl.into_inner();
+
+        debug_assert_eq!(
+            inner.next().unwrap().as_rule(),
+            parser::Rule::CONST_ASSERT_KEYWORD
+        );
+
+        let expr = inner.next().unwrap();
+        let expr = Self::parse_expression(module, issues, expr);
+        let expr = match expr {
+            Ok(expr) => expr,
+            Err(()) => return,
+        };
+        let expr = module.expressions.append(expr);
+
+        debug_assert!(inner.next().is_none());
+
+        module.declarations.append(WithSpan::new(
+            GlobalDeclaration::ConstAssert(ConstAssertStatement { expr }),
+            const_assert_span,
+        ));
     }
 
     /// Remove all of the span information from this module. Useful when testing semantic equivalence
@@ -2096,7 +2124,7 @@ mod tests {
     use crate::spans::Span;
 
     use super::{
-        expression::CallPhrase,
+        expression::{BinaryOperator, CallPhrase},
         variables::{OptionallyTypedIdent, TypeSpecifier, VariableDeclaration},
         *,
     };
@@ -2147,6 +2175,22 @@ mod tests {
     #[case("alias bar = vec2<bool;")]
     #[case("alias bar;")]
     #[case("alias bar = u32")]
+    // Invalid structs
+    #[case("struct")]
+    #[case("struct;")]
+    #[case("struct {}")]
+    #[case("struct { v1: u32 }")]
+    #[case("struct Foo")]
+    #[case("struct Foo;")]
+    #[case("struct Foo { u32 }")]
+    #[case("struct Foo ( u32 )")]
+    #[case("struct Foo { v1: 8 }")]
+    #[case("struct Foo { ,, }")]
+    // Invalid const asserts
+    #[case("const_assert")]
+    #[case("const_assert;")]
+    #[case("const_assert {}")]
+    #[case("const_assert true")]
     fn parse_invalid_fails(#[case] invalid: &str) {
         assert!(
             ParsedModule::parse("invalid_module_test.ewgsl", invalid).is_err(),
@@ -2764,6 +2808,61 @@ mod tests {
         assert_parse_as_different(
             "struct Foo {v1: u32, v2: f32}",
             "struct Foo {v1: f32, v2: u32}",
+        );
+    }
+
+    #[test]
+    fn parse_valid_succeeds_case_global_const_assert_01() {
+        let src = "const_assert A < B;";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+
+        let empty_args = expected_module.expressions.append_all(vec![]);
+        let a = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("A").unwrap().into(),
+                    args: empty_args.clone(),
+                },
+            }
+            .into(),
+        );
+        let b = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("B").unwrap().into(),
+                    args: empty_args,
+                },
+            }
+            .into(),
+        );
+        let rhs = expected_module.expressions.append(
+            Expression::Binary {
+                lhs: a,
+                op: BinaryOperator::LessThan.into(),
+                rhs: b,
+            }
+            .into(),
+        );
+
+        expected_module
+            .declarations
+            .append(GlobalDeclaration::ConstAssert(ConstAssertStatement { expr: rhs }).into());
+
+        assert_parse_valid_succeeds(src, expected_module)
+    }
+    #[test]
+    fn parse_valid_same_case_global_const_assert_01() {
+        assert_parse_as_same(
+            "const_assert (A + B) != C[3];",
+            "          const_assert     (       A    +       B      )     !=        C     [ 3  ]        ;;;;",
+        )
+    }
+    #[test]
+    fn parse_valid_different_case_global_const_assert_01() {
+        assert_parse_as_different(
+            "const_assert (A + B) != C[3];",
+            "const_assert A + B != C[3];",
         );
     }
 }

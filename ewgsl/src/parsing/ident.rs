@@ -261,16 +261,8 @@ impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
             return false;
         }
 
-        let lhs_args = &own_context[self.args.clone()];
-        let rhs_args = &other_context[other.args.clone()];
-        if lhs_args.len() != rhs_args.len() {
+        if !self.args.eq_in(own_context, &other.args, other_context) {
             return false;
-        }
-
-        for (lhs, rhs) in lhs_args.into_iter().zip(rhs_args) {
-            if !lhs.eq_in(own_context, rhs, other_context) {
-                return false;
-            }
         }
 
         return true;
