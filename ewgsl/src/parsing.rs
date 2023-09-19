@@ -5,9 +5,9 @@ pub mod ident;
 pub mod variables;
 
 use crate::{
-    arena::{self, Arena, Handle, HandleRange},
+    arena::{self, empty_handle_range, Arena, Handle, HandleRange},
     parsing::variables::GlobalVariableDeclaration,
-    spans::{self, Spanned},
+    spans::{self, Spanned, WithSpan},
     EqIn,
 };
 
@@ -32,6 +32,7 @@ use self::{
     attributes::{Attribute, AttributeIdentifier},
     expression::Expression,
     ident::{Ident, TemplatedIdent},
+    variables::{GlobalConstantDeclaration, GlobalOverrideDeclaration},
 };
 
 mod parser {
@@ -534,6 +535,8 @@ pub struct ParsedModule<'a, S: spans::SpanState = spans::SpansPresent> {
     pub attributes: Arena<Attribute<'a, S>, S>,
     pub expressions: Arena<Expression<'a, S>, S>,
     pub global_variables: Arena<GlobalVariableDeclaration<'a, S>, S>,
+    pub constants: Arena<GlobalConstantDeclaration<'a, S>, S>,
+    pub overrides: Arena<GlobalOverrideDeclaration<'a, S>, S>,
 }
 
 impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
@@ -544,6 +547,8 @@ impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
             attributes: Arena::new(),
             expressions: Arena::new(),
             global_variables: Arena::new(),
+            constants: Arena::new(),
+            overrides: Arena::new(),
         }
     }
 }
@@ -1546,7 +1551,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
             // Update the range
             let mut new_range = range.unwrap_or(attribute_handle..attribute_handle);
-            new_range.end = attribute_handle;
+            new_range.end = attribute_handle.exclusive();
             range = Some(new_range);
 
             parsed_count += 1;
@@ -1682,11 +1687,75 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     fn parse_global_value_decl(
         module: &mut ParsedModule<'a>,
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
-        global_value_decl: Pair<'_, parser::Rule>,
+        global_value_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(global_value_decl.as_rule(), parser::Rule::GLOBAL_VALUE_DECL);
+        let global_value_decl_span = global_value_decl.as_span().into();
 
-        todo!()
+        let mut inner = global_value_decl.into_inner();
+
+        let is_const = inner.peek().unwrap().as_rule() == parser::Rule::CONST_KEYWORD;
+        let attributes = if is_const {
+            // Constant keyword
+            debug_assert_eq!(inner.next().unwrap().as_rule(), parser::Rule::CONST_KEYWORD);
+
+            Ok(empty_handle_range())
+        } else {
+            // Override expression
+            let attributes = inner.next().unwrap();
+            let attributes = Self::parse_attribute_set(module, issues, attributes);
+
+            // Override keyword
+            debug_assert_eq!(
+                inner.next().unwrap().as_rule(),
+                parser::Rule::OVERRIDE_KEYWORD
+            );
+
+            attributes
+        };
+
+        // Decl and init are shared by both constants and overrides
+        let decl = inner.next().unwrap();
+        let decl_span = decl.as_span().into();
+        let decl = Self::parse_optionally_typed_ident(module, issues, decl);
+
+        let init = inner
+            .next()
+            .map(|init| Self::parse_expression(module, issues, init));
+
+        let decl = match decl {
+            Ok(decl) => WithSpan::new(decl, decl_span),
+            Err(()) => return,
+        };
+        let attributes = match attributes {
+            Ok(attributes) => attributes,
+            Err(attributes) => attributes,
+        };
+        let init = match init {
+            None => None,
+            Some(Ok(init)) => Some(init),
+            Some(Err(())) => return,
+        };
+
+        if is_const {
+            debug_assert_eq!(attributes.start.index(), attributes.end.index());
+            let const_decl = variables::GlobalConstantDeclaration {
+                decl,
+                init: init.expect("all constants have an initial value"),
+            };
+            module
+                .constants
+                .append(WithSpan::new(const_decl, global_value_decl_span));
+        } else {
+            let override_decl = variables::GlobalOverrideDeclaration {
+                attributes,
+                decl,
+                init,
+            };
+            module
+                .overrides
+                .append(WithSpan::new(override_decl, global_value_decl_span));
+        }
     }
 
     // Type alias declarations use the `alias` keyword.
@@ -1760,6 +1829,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 .global_variables
                 .erase_spans()
                 .map(|gv| gv.erase_spans()),
+            constants: self.constants.erase_spans().map(|gv| gv.erase_spans()),
+            overrides: self.overrides.erase_spans().map(|gv| gv.erase_spans()),
         }
     }
 }
@@ -1847,6 +1918,9 @@ mod tests {
     #[case("@group var v: u32;")]
     #[case("@group(1, 2) var v: u32;")]
     #[case("@const(3) var v: u32;")]
+    #[case("var<,> bar: u32 = 1 + 2;")]
+    #[case("var<a,,> bar: u32;")]
+    // Invalid constants
     fn parse_invalid_fails(#[case] invalid: &str) {
         assert!(
             ParsedModule::parse("invalid_module_test.ewgsl", invalid).is_err(),
@@ -1855,7 +1929,10 @@ mod tests {
         )
     }
 
-    fn parse_valid_succeeds<'a>(valid: &'a str, expected: ParsedModule<'a, spans::SpansErased>) {
+    fn assert_parse_valid_succeeds<'a>(
+        valid: &'a str,
+        expected: ParsedModule<'a, spans::SpansErased>,
+    ) {
         let res = ParsedModule::parse("valid_module_test.ewgsl", valid);
 
         match res {
@@ -1873,9 +1950,31 @@ mod tests {
         }
     }
 
+    fn assert_parse_as_same<'a>(src1: &'a str, src2: &'a str) {
+        let res1 = ParsedModule::parse("valid_module_test_1.ewgsl", src1);
+        let res1 = match res1 {
+            Err(e) => panic!(
+                "`{}` was a valid module, but parsed as invalid: {}",
+                src1,
+                e.diagnostics()
+            ),
+            Ok(res) => res,
+        };
+
+        let res2 = ParsedModule::parse("valid_module_test_2.ewgsl", src2).unwrap();
+
+        assert_eq!(
+            res1.erase_spans(),
+            res2.erase_spans(),
+            "`{}` and `{}` parsed differently",
+            src1,
+            src2
+        )
+    }
+
     #[test]
     fn parse_valid_succeeds_case_directives_01() {
-        parse_valid_succeeds(
+        assert_parse_valid_succeeds(
             "diagnostic error;",
             ParsedModule::<spans::SpansErased> {
                 directives: directives::Directives {
@@ -1888,7 +1987,7 @@ mod tests {
     }
     #[test]
     fn parse_valid_succeeds_case_directives_02() {
-        parse_valid_succeeds(
+        assert_parse_valid_succeeds(
             "\t\tdiagnostic\n info\r\n;",
             ParsedModule::<spans::SpansErased> {
                 directives: directives::Directives {
@@ -1901,7 +2000,7 @@ mod tests {
     }
     #[test]
     fn parse_valid_succeeds_case_directives_03() {
-        parse_valid_succeeds(
+        assert_parse_valid_succeeds(
             "diagnostic error;\ndiagnostic info;",
             ParsedModule::<spans::SpansErased> {
                 directives: directives::Directives {
@@ -1917,7 +2016,7 @@ mod tests {
     }
     #[test]
     fn parse_valid_succeeds_case_directives_04() {
-        parse_valid_succeeds(
+        assert_parse_valid_succeeds(
             "diagnostic warning;\r\nenable f16;",
             ParsedModule::<spans::SpansErased> {
                 directives: directives::Directives {
@@ -1931,7 +2030,7 @@ mod tests {
     }
     #[test]
     fn parse_valid_succeeds_case_directives_05() {
-        parse_valid_succeeds(
+        assert_parse_valid_succeeds(
             r"
             // Enable 16 bit (half) floats
             enable f16;
@@ -1964,7 +2063,7 @@ mod tests {
 
     #[test]
     fn parse_valid_succeeds_case_global_var_01() {
-        parse_valid_succeeds(
+        assert_parse_valid_succeeds(
             "var foo: u32;",
             ParsedModule::<spans::SpansErased> {
                 global_variables: arena![GlobalVariableDeclaration {
@@ -1984,6 +2083,25 @@ mod tests {
                 }],
                 ..ParsedModule::default()
             },
+        )
+    }
+    #[test]
+    fn parse_valid_same_case_global_var_02() {
+        assert_parse_as_same("var<> foo: u32;", "\nvar   foo : u32 ; ")
+    }
+    #[test]
+    fn parse_valid_same_case_global_var_03() {
+        assert_parse_as_same(
+            r"
+                @group(0) @binding(0) var<storage> foo: array<f32>;
+                var<private> bar: vec3<u32>;
+            ",
+            r"
+                @binding(0) @group(0) var<storage> foo: 
+                    array<f32>;
+                var<private> bar: 
+                    vec3<u32>;
+            ",
         )
     }
 }

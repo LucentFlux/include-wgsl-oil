@@ -245,6 +245,36 @@ impl<'a> Attribute<'a> {
     }
 }
 
+impl<'a, S: spans::SpanState> Attribute<'a, S> {
+    /// Checks that two sets of attributes are equivalent. Currently O(n^2) but fast because we assume things will have small amounts of attributes.
+    pub fn are_sets_eq_in(
+        lhs: Range<Handle<Self>>,
+        lhs_context_1: &Arena<Self, S>,
+        lhs_context_2: &Arena<Expression<'a, S>, S>,
+        rhs: Range<Handle<Self>>,
+        rhs_context_1: &Arena<Self, S>,
+        rhs_context_2: &Arena<Expression<'a, S>, S>,
+    ) -> bool {
+        let lhs_attributes = &lhs_context_1[lhs];
+        let mut lhs_attributes = lhs_attributes.into_iter().collect::<Vec<_>>();
+
+        for rhs_attribute in &rhs_context_1[rhs] {
+            let mut found = false;
+            for i in 0..lhs_attributes.len() {
+                if lhs_attributes[i].eq_in(lhs_context_2, rhs_attribute, rhs_context_2) {
+                    lhs_attributes.remove(i);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
 impl<'a> Spanned for Attribute<'a> {
     type Spanless = Attribute<'a, spans::SpansErased>;
 

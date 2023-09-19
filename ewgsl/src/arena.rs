@@ -48,6 +48,14 @@ impl<T> Handle<T> {
     const unsafe fn from_usize_unchecked(index: usize) -> Self {
         Handle::new(Index::new_unchecked(index + 1))
     }
+
+    /// Gets the next handle, for use in Range generation where the upper bound must be exclusive.
+    pub(crate) fn exclusive(&self) -> Self {
+        Self {
+            index: self.index.saturating_add(1),
+            marker: self.marker,
+        }
+    }
 }
 
 impl<T: Spanned> Spanned for Handle<T> {
