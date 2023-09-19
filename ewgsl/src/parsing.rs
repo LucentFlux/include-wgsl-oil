@@ -3,10 +3,11 @@ pub mod attributes;
 pub mod directives;
 pub mod expression;
 pub mod ident;
+pub mod structs;
 pub mod variables;
 
 use crate::{
-    arena::{self, empty_handle_range, Arena, Handle, HandleRange},
+    arena::{Arena, Handle, HandleRange},
     parsing::{alias::TypeAliasDeclaration, variables::GlobalVariableDeclaration},
     spans::{self, Spanned, WithSpan},
     EqIn,
@@ -14,7 +15,9 @@ use crate::{
 
 use std::{
     fmt::{Debug, Display},
+    mem::discriminant,
     num::NonZeroUsize,
+    ops::Range,
 };
 
 use codespan_reporting::{
@@ -33,6 +36,7 @@ use self::{
     attributes::{Attribute, AttributeIdentifier},
     expression::Expression,
     ident::{Ident, TemplatedIdent},
+    structs::{StructDeclaration, StructMember},
     variables::{GlobalConstantDeclaration, GlobalOverrideDeclaration},
 };
 
@@ -63,7 +67,6 @@ impl Display for parser::Rule {
             parser::Rule::LITERAL => "literal",
             parser::Rule::START => "start",
             parser::Rule::CONTINUE => "continue",
-            parser::Rule::IDENT_PATTERN_TOKEN => "identifier pattern token",
             parser::Rule::IDENT => "identifier",
             parser::Rule::TEMPLATE_ARG_EXPRESSION => "template arg expression",
             parser::Rule::TEMPLATE_LIST => "template list",
@@ -82,7 +85,6 @@ impl Display for parser::Rule {
             parser::Rule::GLOBAL_DIRECTIVE => "global directive",
             parser::Rule::TEMPLATE_ELABORATED_IDENT => "template elaborated identifier",
             parser::Rule::TYPE_SPECIFIER => "type specifier",
-            parser::Rule::MEMBER_IDENT => "member identifier",
             parser::Rule::STRUCT_MEMBER => "struct member",
             parser::Rule::STRUCT_BODY_DECL => "struct body declaration",
             parser::Rule::STRUCT_KEYWORD => "`struct` keyword",
@@ -535,16 +537,79 @@ impl<'a> Display for ErrorDiagnostics<'a> {
 
 pub type ParseResult<'a> = Result<ParsedModule<'a>, ParseError<'a>>;
 
+#[derive(Debug)]
+pub enum GlobalDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
+    Variable(GlobalVariableDeclaration<'a, S>),
+    Constant(GlobalConstantDeclaration<'a, S>),
+    Override(GlobalOverrideDeclaration<'a, S>),
+    Alias(TypeAliasDeclaration<'a, S>),
+    Struct(StructDeclaration<'a, S>),
+}
+
+impl<'a> Spanned for GlobalDeclaration<'a> {
+    type Spanless = GlobalDeclaration<'a, spans::SpansErased>;
+
+    fn erase_spans(self) -> Self::Spanless {
+        match self {
+            GlobalDeclaration::Variable(v) => GlobalDeclaration::Variable(v.erase_spans()),
+            GlobalDeclaration::Constant(c) => GlobalDeclaration::Constant(c.erase_spans()),
+            GlobalDeclaration::Override(o) => GlobalDeclaration::Override(o.erase_spans()),
+            GlobalDeclaration::Alias(a) => GlobalDeclaration::Alias(a.erase_spans()),
+            GlobalDeclaration::Struct(s) => GlobalDeclaration::Struct(s.erase_spans()),
+        }
+    }
+}
+
+impl<'a, S: spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
+    type Context<'b> = (&'b Arena<Attribute<'a, S>, S>, &'b Arena<Expression<'a, S>, S>, &'b Arena<StructMember<'a, S>, S>)
+    where
+        'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        if discriminant(self) != discriminant(other) {
+            return false;
+        }
+
+        match (self, other) {
+            (GlobalDeclaration::Variable(lhs), GlobalDeclaration::Variable(rhs)) => lhs.eq_in(
+                &(own_context.0, own_context.1),
+                rhs,
+                &(other_context.0, other_context.1),
+            ),
+            (GlobalDeclaration::Constant(lhs), GlobalDeclaration::Constant(rhs)) => {
+                lhs.eq_in(own_context.1, rhs, other_context.1)
+            }
+            (GlobalDeclaration::Override(lhs), GlobalDeclaration::Override(rhs)) => lhs.eq_in(
+                &(own_context.0, own_context.1),
+                rhs,
+                &(other_context.0, other_context.1),
+            ),
+            (GlobalDeclaration::Alias(lhs), GlobalDeclaration::Alias(rhs)) => {
+                lhs.eq_in(own_context.1, rhs, other_context.1)
+            }
+            (GlobalDeclaration::Struct(lhs), GlobalDeclaration::Struct(rhs)) => lhs.eq_in(
+                &(own_context.0, own_context.1, own_context.2),
+                rhs,
+                &(other_context.0, other_context.1, other_context.2),
+            ),
+            _ => unreachable!(),
+        }
+    }
+}
+
 /// A single module (source file), many of which can be unified into a shader.
 #[perfect_derive(Debug)]
 pub struct ParsedModule<'a, S: spans::SpanState = spans::SpansPresent> {
     pub directives: directives::Directives<S>,
     pub attributes: Arena<Attribute<'a, S>, S>,
     pub expressions: Arena<Expression<'a, S>, S>,
-    pub global_variables: Arena<GlobalVariableDeclaration<'a, S>, S>,
-    pub constants: Arena<GlobalConstantDeclaration<'a, S>, S>,
-    pub overrides: Arena<GlobalOverrideDeclaration<'a, S>, S>,
-    pub aliases: Arena<TypeAliasDeclaration<'a, S>, S>,
+    pub members: Arena<StructMember<'a, S>, S>,
+    pub declarations: Arena<GlobalDeclaration<'a, S>, S>,
 }
 
 impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
@@ -554,10 +619,8 @@ impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
             directives: directives::Directives::empty(),
             attributes: Arena::new(),
             expressions: Arena::new(),
-            global_variables: Arena::new(),
-            constants: Arena::new(),
-            overrides: Arena::new(),
-            aliases: Arena::new(),
+            members: Arena::new(),
+            declarations: Arena::new(),
         }
     }
 }
@@ -1236,7 +1299,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                     swizzle: spans::WithSpan::new(swizzle, accessor_span),
                 }
             }
-            parser::Rule::MEMBER_IDENT => {
+            parser::Rule::IDENT => {
                 let member_ident = inner.as_str();
                 Expression::MemberAccess {
                     base: base_expression,
@@ -1502,91 +1565,83 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         })
     }
 
+    /// Parses a single Rule::ATTRIBUTE
+    fn parse_attribute(
+        module: &mut ParsedModule<'a>,
+        issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
+        attribute: Pair<'a, parser::Rule>,
+    ) -> Result<WithSpan<Attribute<'a>>, ()> {
+        debug_assert_eq!(attribute.as_rule(), parser::Rule::ATTRIBUTE);
+        let attribute_span = attribute.as_span().into();
+
+        let attribute_inner = attribute
+            .into_inner()
+            .next()
+            .expect("Rule::ATTRIBUTE has a single inner Rule::ATTRIBUTE_INNER");
+        debug_assert_eq!(attribute_inner.as_rule(), parser::Rule::ATTRIBUTE_INNER);
+
+        let mut attribute_inner = attribute_inner.into_inner();
+
+        // Extract the keyword (after the `@`, before the parentheses)
+        let keyword = attribute_inner
+            .next()
+            .expect("all attributes start with a keyword");
+        debug_assert_eq!(keyword.as_rule(), parser::Rule::IDENT);
+        let keyword_span = keyword.as_span().into();
+        let identifier = match attributes::AttributeIdentifier::parse(keyword.as_str()) {
+            Some(identifier) => spans::WithSpan::new(identifier, keyword_span),
+            None => {
+                issues.push(spans::WithSpan::new(
+                    ParseIssue::UnknownAttributeIdentifier {
+                        found: keyword.as_str().to_owned(),
+                    },
+                    keyword_span,
+                ));
+                return Err(());
+            }
+        };
+
+        // Extract any arguments
+        let mut expressions = Vec::new();
+        while let Some(expression) = attribute_inner.next() {
+            let expression = Self::parse_expression(module, issues, expression);
+            expressions.push(expression);
+        }
+        let expressions = expressions.into_iter().collect::<Result<Vec<_>, ()>>();
+        let expressions = match expressions {
+            Ok(expressions) => expressions,
+            Err(()) => return Err(()),
+        };
+
+        // build and validate at the same time
+        let attribute =
+            match attributes::Attribute::try_parse_from(&*module, identifier, expressions) {
+                Ok(attribute) => attribute,
+                Err(mut attribute_issues) => {
+                    issues.append(&mut attribute_issues);
+                    return Err(());
+                }
+            };
+
+        return Ok(WithSpan::new(attribute, attribute_span));
+    }
+
     fn parse_attribute_set(
         module: &mut ParsedModule<'a>,
         issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
         attributes: Pair<'a, parser::Rule>,
-    ) -> Result<HandleRange<Attribute<'a>>, HandleRange<Attribute<'a>>> {
+    ) -> HandleRange<Attribute<'a>> {
         debug_assert_eq!(attributes.as_rule(), parser::Rule::ATTRIBUTE_SET);
 
-        let attributes = attributes.into_inner();
-
-        let mut range = None;
-        let mut found_count = 0;
-        let mut parsed_count = 0;
-        for attribute in attributes {
-            debug_assert_eq!(attribute.as_rule(), parser::Rule::ATTRIBUTE);
-            let attribute_span = attribute.as_span().into();
-            found_count += 1;
-
-            let attribute_inner = attribute
-                .into_inner()
-                .next()
-                .expect("Rule::ATTRIBUTE has a single inner Rule::ATTRIBUTE_INNER");
-            debug_assert_eq!(attribute_inner.as_rule(), parser::Rule::ATTRIBUTE_INNER);
-
-            let mut attribute_inner = attribute_inner.into_inner();
-
-            // Extract the keyword (after the `@`, before the parentheses)
-            let keyword = attribute_inner
-                .next()
-                .expect("all attributes start with a keyword");
-            debug_assert_eq!(keyword.as_rule(), parser::Rule::IDENT);
-            let keyword_span = keyword.as_span().into();
-            let identifier = match attributes::AttributeIdentifier::parse(keyword.as_str()) {
-                Some(identifier) => spans::WithSpan::new(identifier, keyword_span),
-                None => {
-                    issues.push(spans::WithSpan::new(
-                        ParseIssue::UnknownAttributeIdentifier {
-                            found: keyword.as_str().to_owned(),
-                        },
-                        keyword_span,
-                    ));
-                    continue;
-                }
-            };
-
-            // Extract any arguments
-            let mut expressions = Vec::new();
-            while let Some(expression) = attribute_inner.next() {
-                let expression = Self::parse_expression(module, issues, expression);
-                expressions.push(expression);
+        let mut found_attributes = vec![];
+        for attribute in attributes.into_inner() {
+            let attribute = Self::parse_attribute(module, issues, attribute);
+            if let Ok(attribute) = attribute {
+                found_attributes.push(attribute);
             }
-            let expressions = expressions.into_iter().collect::<Result<Vec<_>, ()>>();
-            let expressions = match expressions {
-                Ok(expressions) => expressions,
-                Err(()) => continue,
-            };
-
-            // build and validate at the same time
-            let attribute =
-                match attributes::Attribute::try_parse_from(&*module, identifier, expressions) {
-                    Ok(attribute) => attribute,
-                    Err(mut attribute_issues) => {
-                        issues.append(&mut attribute_issues);
-                        continue;
-                    }
-                };
-
-            // Add to the arena
-            let attribute_handle = module
-                .attributes
-                .append(spans::WithSpan::new(attribute, attribute_span));
-
-            // Update the range
-            let mut new_range = range.unwrap_or(attribute_handle..attribute_handle);
-            new_range.end = attribute_handle.exclusive();
-            range = Some(new_range);
-
-            parsed_count += 1;
         }
 
-        let range = range.unwrap_or(arena::empty_handle_range());
-        if parsed_count != found_count {
-            return Err(range);
-        } else {
-            return Ok(range);
-        }
+        return module.attributes.append_all(found_attributes);
     }
 
     fn parse_type_specifier(
@@ -1686,10 +1741,6 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         debug_assert!(inner.next().is_none());
 
         // Try recover what we can from errors
-        let attributes = match attributes {
-            Ok(attributes) => attributes,
-            Err(attributes) => attributes,
-        };
         let lhs = match lhs {
             Ok(lhs) => lhs,
             Err(()) => return,
@@ -1701,8 +1752,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             decl: spans::WithSpan::new(lhs, lhs_span),
             init: rhs,
         };
-        module.global_variables.append(spans::WithSpan::new(
-            global_var_decl,
+        module.declarations.append(spans::WithSpan::new(
+            GlobalDeclaration::Variable(global_var_decl),
             global_variable_decl_span,
         ));
     }
@@ -1723,7 +1774,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             // Constant keyword
             debug_assert_eq!(inner.next().unwrap().as_rule(), parser::Rule::CONST_KEYWORD);
 
-            Ok(empty_handle_range())
+            module.attributes.append_all(vec![])
         } else {
             // Override expression
             let attributes = inner.next().unwrap();
@@ -1751,10 +1802,6 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             Ok(decl) => WithSpan::new(decl, decl_span),
             Err(()) => return,
         };
-        let attributes = match attributes {
-            Ok(attributes) => attributes,
-            Err(attributes) => attributes,
-        };
         let init = match init {
             None => None,
             Some(Ok(init)) => Some(init),
@@ -1767,18 +1814,20 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 decl,
                 init: init.expect("all constants have an initial value"),
             };
-            module
-                .constants
-                .append(WithSpan::new(const_decl, global_value_decl_span));
+            module.declarations.append(WithSpan::new(
+                GlobalDeclaration::Constant(const_decl),
+                global_value_decl_span,
+            ));
         } else {
             let override_decl = variables::GlobalOverrideDeclaration {
                 attributes,
                 decl,
                 init,
             };
-            module
-                .overrides
-                .append(WithSpan::new(override_decl, global_value_decl_span));
+            module.declarations.append(WithSpan::new(
+                GlobalDeclaration::Override(override_decl),
+                global_value_decl_span,
+            ));
         }
     }
 
@@ -1817,7 +1866,61 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             ty: rhs,
         };
 
-        module.aliases.append(WithSpan::new(alias_decl, alias_span));
+        module.declarations.append(WithSpan::new(
+            GlobalDeclaration::Alias(alias_decl),
+            alias_span,
+        ));
+    }
+
+    // A member of a struct definition
+    fn parse_struct_member(
+        module: &mut ParsedModule<'a>,
+        issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
+        struct_member: Pair<'a, parser::Rule>,
+    ) -> Result<WithSpan<StructMember<'a>>, ()> {
+        debug_assert_eq!(struct_member.as_rule(), parser::Rule::STRUCT_MEMBER);
+        let struct_member_span = struct_member.as_span().into();
+
+        let mut inner = struct_member.into_inner();
+
+        let attributes = Self::parse_attribute_set(module, issues, inner.next().unwrap());
+        let ident = Self::parse_ident(module, issues, inner.next().unwrap());
+        let ty = Self::parse_type_specifier(module, issues, inner.next().unwrap());
+
+        debug_assert!(inner.next().is_none());
+
+        let ident = ident?;
+        let ty = ty?;
+
+        return Ok(WithSpan::new(
+            StructMember {
+                attributes,
+                ident,
+                ty,
+            },
+            struct_member_span,
+        ));
+    }
+
+    /// The body of a struct, between the two `{` `}`.
+    /// Drops invalid members, reporting issues and returning the set of valid members.
+    fn parse_struct_body(
+        module: &mut ParsedModule<'a>,
+        issues: &mut Vec<spans::WithSpan<ParseIssue<'a>>>,
+        struct_body: Pair<'a, parser::Rule>,
+    ) -> WithSpan<Range<Handle<StructMember<'a>>>> {
+        debug_assert_eq!(struct_body.as_rule(), parser::Rule::STRUCT_BODY_DECL);
+        let struct_body_span = struct_body.as_span().into();
+
+        let mut members = vec![];
+        for member in struct_body.into_inner() {
+            if let Ok(member) = Self::parse_struct_member(module, issues, member) {
+                members.push(member);
+            }
+        }
+
+        let members = module.members.append_all(members);
+        return WithSpan::new(members, struct_body_span);
     }
 
     // Struct declarations use the `struct` keyword.
@@ -1827,8 +1930,34 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         struct_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(struct_decl.as_rule(), parser::Rule::STRUCT_DECL);
+        let struct_span = struct_decl.as_span().into();
 
-        todo!()
+        let mut inner = struct_decl.into_inner();
+
+        debug_assert_eq!(
+            inner.next().unwrap().as_rule(),
+            parser::Rule::STRUCT_KEYWORD
+        );
+
+        // Struct name
+        let ident = Self::parse_ident(module, issues, inner.next().unwrap());
+
+        // Struct fields
+        let members = Self::parse_struct_body(module, issues, inner.next().unwrap());
+
+        debug_assert!(inner.next().is_none());
+
+        let ident = match ident {
+            Ok(ident) => ident,
+            Err(()) => return,
+        };
+
+        let struct_decl = StructDeclaration { ident, members };
+
+        module.declarations.append(WithSpan::new(
+            GlobalDeclaration::Struct(struct_decl),
+            struct_span,
+        ));
     }
 
     // Function declarations use the `fn` keyword.
@@ -1869,20 +1998,26 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// assert!(mod1.erase_spans() == mod2.erase_spans());
     /// ```
     pub fn erase_spans(self) -> ParsedModule<'a, spans::SpansErased> {
+        Spanned::erase_spans(self)
+    }
+}
+
+impl<'a> Spanned for ParsedModule<'a> {
+    type Spanless = ParsedModule<'a, spans::SpansErased>;
+
+    fn erase_spans(self) -> Self::Spanless {
         ParsedModule {
             directives: self.directives.erase_spans(),
-            attributes: self.attributes.erase_spans().map(|expr| expr.erase_spans()),
+            attributes: self.attributes.erase_spans().map(|attr| attr.erase_spans()),
             expressions: self
                 .expressions
                 .erase_spans()
                 .map(|expr| expr.erase_spans()),
-            global_variables: self
-                .global_variables
+            members: self
+                .members
                 .erase_spans()
-                .map(|gv| gv.erase_spans()),
-            constants: self.constants.erase_spans().map(|gv| gv.erase_spans()),
-            overrides: self.overrides.erase_spans().map(|gv| gv.erase_spans()),
-            aliases: self.aliases.erase_spans().map(|alias| alias.erase_spans()),
+                .map(|member| member.erase_spans()),
+            declarations: self.declarations.erase_spans().map(|dec| dec.erase_spans()),
         }
     }
 }
@@ -1901,57 +2036,17 @@ where
         if self.directives != other.directives {
             return false;
         }
-        // Search through globals, checking each global is in both modules
-        if self.global_variables.len() != other.global_variables.len() {
+        // Search through declarations, checking each declaration is in both modules
+        if self.declarations.len() != other.declarations.len() {
             return false;
         }
-        'outer: for (_, lhs) in self.global_variables.iter() {
-            for (_, rhs) in other.global_variables.iter() {
+        'outer: for (_, lhs) in self.declarations.iter() {
+            for (_, rhs) in other.declarations.iter() {
                 if lhs.eq_in(
-                    &(&self.attributes, &self.expressions),
+                    &(&self.attributes, &self.expressions, &self.members),
                     rhs,
-                    &(&other.attributes, &other.expressions),
+                    &(&other.attributes, &other.expressions, &other.members),
                 ) {
-                    continue 'outer;
-                }
-            }
-            return false;
-        }
-        // Search through constants, checking each constant is in both modules
-        if self.constants.len() != other.constants.len() {
-            return false;
-        }
-        'outer: for (_, lhs) in self.constants.iter() {
-            for (_, rhs) in other.constants.iter() {
-                if lhs.eq_in(&self.expressions, rhs, &other.expressions) {
-                    continue 'outer;
-                }
-            }
-            return false;
-        }
-        // Search through overrides, checking each override is in both modules
-        if self.overrides.len() != other.overrides.len() {
-            return false;
-        }
-        'outer: for (_, lhs) in self.overrides.iter() {
-            for (_, rhs) in other.overrides.iter() {
-                if lhs.eq_in(
-                    &(&self.attributes, &self.expressions),
-                    rhs,
-                    &(&other.attributes, &other.expressions),
-                ) {
-                    continue 'outer;
-                }
-            }
-            return false;
-        }
-        // Search through aliases, checking each alias is in both modules
-        if self.aliases.len() != other.aliases.len() {
-            return false;
-        }
-        'outer: for (_, lhs) in self.aliases.iter() {
-            for (_, rhs) in other.aliases.iter() {
-                if lhs.eq_in(&self.expressions, rhs, &other.expressions) {
                     continue 'outer;
                 }
             }
@@ -1965,6 +2060,7 @@ impl<'a, S: spans::SpanState> Eq for ParsedModule<'a, S> where Self: PartialEq {
 
 #[cfg(test)]
 mod tests {
+    use crate::arena::arena;
     use crate::spans::Span;
 
     use super::{
@@ -1972,7 +2068,6 @@ mod tests {
         variables::{OptionallyTypedIdent, TypeSpecifier, VariableDeclaration},
         *,
     };
-    use arena::arena;
 
     #[test]
     fn parse_empty_gives_empty_module() {
@@ -2228,23 +2323,21 @@ mod tests {
             }
             .into(),
         );
-        let attr1 = expected_module.attributes.append(
+        let attrs = expected_module.attributes.append_all(vec![
             Attribute {
                 identifier_span: Span::empty(),
                 inner: attributes::AttributeInner::Group(zero),
             }
             .into(),
-        );
-        let attr2 = expected_module.attributes.append(
             Attribute {
                 identifier_span: Span::empty(),
                 inner: attributes::AttributeInner::Binding(zero),
             }
             .into(),
-        );
-        expected_module.global_variables.append(
-            GlobalVariableDeclaration {
-                attributes: attr1..attr2.exclusive(),
+        ]);
+        expected_module.declarations.append(
+            GlobalDeclaration::Variable(GlobalVariableDeclaration {
+                attributes: attrs,
                 decl: VariableDeclaration {
                     template_list: vec![storage_arg],
                     ident: OptionallyTypedIdent {
@@ -2257,7 +2350,7 @@ mod tests {
                 }
                 .into(),
                 init: None,
-            }
+            })
             .into(),
         );
 
@@ -2312,13 +2405,11 @@ mod tests {
             .into(),
         );
 
-        let must_use_attr = expected_module.attributes.append(
-            Attribute {
-                identifier_span: Span::empty(),
-                inner: attributes::AttributeInner::MustUse,
-            }
-            .into(),
-        );
+        let must_use_attr = expected_module.attributes.append_all(vec![Attribute {
+            identifier_span: Span::empty(),
+            inner: attributes::AttributeInner::MustUse,
+        }
+        .into()]);
 
         let rhs = expected_module.expressions.append(
             Expression::Call(CallPhrase {
@@ -2331,9 +2422,9 @@ mod tests {
             .into(),
         );
 
-        expected_module.global_variables.append(
-            GlobalVariableDeclaration {
-                attributes: must_use_attr..must_use_attr.exclusive(),
+        expected_module.declarations.append(
+            GlobalDeclaration::Variable(GlobalVariableDeclaration {
+                attributes: must_use_attr,
                 decl: VariableDeclaration {
                     template_list: vec![private_arg],
                     ident: OptionallyTypedIdent {
@@ -2346,7 +2437,7 @@ mod tests {
                 }
                 .into(),
                 init: Some(rhs),
-            }
+            })
             .into(),
         );
 
@@ -2417,8 +2508,8 @@ mod tests {
             .into(),
         );
 
-        expected_module.constants.append(
-            GlobalConstantDeclaration {
+        expected_module.declarations.append(
+            GlobalDeclaration::Constant(GlobalConstantDeclaration {
                 decl: OptionallyTypedIdent {
                     ident: Ident::try_parse("v").unwrap().into(),
                     ty: Some(TypeSpecifier(TemplatedIdent {
@@ -2428,7 +2519,7 @@ mod tests {
                 }
                 .into(),
                 init: rhs,
-            }
+            })
             .into(),
         );
 
@@ -2462,13 +2553,11 @@ mod tests {
             }
             .into(),
         );
-        let attr = expected_module.attributes.append(
-            Attribute {
-                identifier_span: Span::empty(),
-                inner: attributes::AttributeInner::Id(one),
-            }
-            .into(),
-        );
+        let attr = expected_module.attributes.append_all(vec![Attribute {
+            identifier_span: Span::empty(),
+            inner: attributes::AttributeInner::Id(one),
+        }
+        .into()]);
 
         let rhs = expected_module.expressions.append(
             Expression::Literal {
@@ -2477,16 +2566,16 @@ mod tests {
             .into(),
         );
 
-        expected_module.overrides.append(
-            GlobalOverrideDeclaration {
-                attributes: attr..attr.exclusive(),
+        expected_module.declarations.append(
+            GlobalDeclaration::Override(GlobalOverrideDeclaration {
+                attributes: attr,
                 decl: OptionallyTypedIdent {
                     ident: Ident::try_parse("is_something").unwrap().into(),
                     ty: None,
                 }
                 .into(),
                 init: Some(rhs),
-            }
+            })
             .into(),
         );
 
@@ -2524,7 +2613,7 @@ mod tests {
         let src = "alias MyAlias = vec3<u32>;";
 
         let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
-        let u32_attr = expected_module.expressions.append(
+        let u32_arg = expected_module.expressions.append(
             Expression::Identifier {
                 ident: TemplatedIdent {
                     ident: Ident::try_parse("u32").unwrap().into(),
@@ -2534,14 +2623,14 @@ mod tests {
             .into(),
         );
 
-        expected_module.aliases.append(
-            TypeAliasDeclaration {
+        expected_module.declarations.append(
+            GlobalDeclaration::Alias(TypeAliasDeclaration {
                 ident: Ident::try_parse("MyAlias").unwrap().into(),
                 ty: TypeSpecifier(TemplatedIdent {
                     ident: Ident::try_parse("vec3").unwrap().into(),
-                    args: vec![u32_attr],
+                    args: vec![u32_arg],
                 }),
-            }
+            })
             .into(),
         );
 
@@ -2558,5 +2647,101 @@ mod tests {
     #[test]
     fn parse_valid_different_case_global_alias_02() {
         assert_parse_as_different("alias foo = vec3<u32>;", "alias foo = vec3<f32>;");
+    }
+
+    #[test]
+    fn parse_valid_succeeds_case_struct_01() {
+        let src = r"
+            struct Foo {
+                @size(4)
+                v1: u32,
+                @size(16)
+                v2: vec3<f32>,
+            }
+        ";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+
+        let four = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("4"),
+            }
+            .into(),
+        );
+        let sixteen = expected_module.expressions.append(
+            Expression::Literal {
+                value: expression::Literal::Int("16"),
+            }
+            .into(),
+        );
+
+        let attrs1 = expected_module.attributes.append_all(vec![Attribute {
+            identifier_span: Span::empty(),
+            inner: attributes::AttributeInner::Size(four),
+        }
+        .into()]);
+        let attrs2 = expected_module.attributes.append_all(vec![Attribute {
+            identifier_span: Span::empty(),
+            inner: attributes::AttributeInner::Size(sixteen),
+        }
+        .into()]);
+
+        let f32_arg = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("f32").unwrap().into(),
+                    args: vec![],
+                },
+            }
+            .into(),
+        );
+
+        let members = expected_module
+            .members
+            .append_all(vec![
+                StructMember {
+                    attributes: attrs1,
+                    ident: Ident::try_parse("v1").unwrap().into(),
+                    ty: TypeSpecifier(TemplatedIdent {
+                        ident: Ident::try_parse("u32").unwrap().into(),
+                        args: vec![],
+                    }),
+                }
+                .into(),
+                StructMember {
+                    attributes: attrs2,
+                    ident: Ident::try_parse("v2").unwrap().into(),
+                    ty: TypeSpecifier(TemplatedIdent {
+                        ident: Ident::try_parse("vec3").unwrap().into(),
+                        args: vec![f32_arg],
+                    }),
+                }
+                .into(),
+            ])
+            .into();
+
+        expected_module.declarations.append(
+            GlobalDeclaration::Struct(StructDeclaration {
+                ident: Ident::try_parse("Foo").unwrap().into(),
+                members,
+            })
+            .into(),
+        );
+
+        assert_parse_valid_succeeds(src, expected_module)
+    }
+    #[test]
+    fn parse_valid_same_case_struct_01() {
+        assert_parse_as_same(
+            "struct Foo {v1: u32, v2: f32}",
+            "\t\tstruct \nFoo {\n\tv1: u32,\r\n\t v2: f32};;",
+        )
+    }
+    #[test]
+    fn parse_valid_different_case_struct_01() {
+        assert_parse_as_different(
+            "struct Foo {v1: u32, v2: f32}",
+            "struct Foo {v1: f32, v2: u32}",
+        );
     }
 }

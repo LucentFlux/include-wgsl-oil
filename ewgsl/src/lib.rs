@@ -124,7 +124,7 @@ fn get_recommended_alternative<'a>(found: &str, alternatives: &[&'a str]) -> Opt
 }
 
 /// Like [`Eq`], but for objects which refer into some sort of context, such as handles into arenas.
-pub trait EqIn<'a>: 'a {
+pub(crate) trait EqIn<'a>: 'a {
     type Context<'b>
     where
         'a: 'b;

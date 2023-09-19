@@ -1,4 +1,4 @@
-//! Taken (with modification) from https://github.com/gfx-rs/naga/blob/master/src/arena.rs
+//! Inspired by https://github.com/gfx-rs/naga/blob/master/src/arena.rs
 
 use std::{
     collections::HashSet,
@@ -47,14 +47,6 @@ impl<T> Handle<T> {
     /// Convert a `usize` index into a `Handle<T>`, without range checks.
     const unsafe fn from_usize_unchecked(index: usize) -> Self {
         Handle::new(Index::new_unchecked(index + 1))
-    }
-
-    /// Gets the next handle, for use in Range generation where the upper bound must be exclusive.
-    pub(crate) fn exclusive(&self) -> Self {
-        Self {
-            index: self.index.saturating_add(1),
-            marker: self.marker,
-        }
     }
 }
 
@@ -134,10 +126,6 @@ impl BadHandle {
 /// A strongly typed range of handles.
 pub type HandleRange<T> = ops::Range<Handle<T>>;
 
-pub fn empty_handle_range<T>() -> ops::Range<Handle<T>> {
-    Handle::new(NonZeroUsize::MIN)..Handle::new(NonZeroUsize::MIN)
-}
-
 // NOTE: Keep this diagnostic in sync with that of [`BadHandle`].
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("Handle range {range:?} of {kind} is either not present yet, or inaccessible")]
@@ -209,6 +197,25 @@ impl<T, S: spans::SpanState> Arena<T, S> {
         let index = self.data.len();
         self.data.push(value);
         Handle::from_usize(index)
+    }
+
+    /// Appends all objects to get a handle range to the inserted items.
+    pub fn append_all(
+        &mut self,
+        members: impl IntoIterator<Item = spans::WithSpan<T, S>>,
+    ) -> Range<Handle<T>> {
+        // Monomorphise
+        fn inner<T, S: spans::SpanState>(
+            arena: &mut Arena<T, S>,
+            mut members: impl Iterator<Item = spans::WithSpan<T, S>>,
+        ) -> Range<Handle<T>> {
+            let start_index = arena.data.len();
+            arena.data.extend(&mut members);
+            let end_index = arena.data.len();
+
+            return Handle::from_usize(start_index)..Handle::from_usize(end_index);
+        }
+        return inner(self, members.into_iter());
     }
 
     /// Uses a handle to look up a value. Use `arena[handle]` for a version that panics on error instead.
@@ -364,7 +371,7 @@ impl<T: Hash + Eq, S: spans::SpanState> Eq for Arena<T, S> {}
 /// # Usage
 ///
 /// With spans:
-/// ```
+/// ```ignore
 /// # let span1 = ewgsl::spans::Span::empty();
 /// # let span2 = ewgsl::spans::Span::empty();
 /// # let v1 = 12;
@@ -377,7 +384,7 @@ impl<T: Hash + Eq, S: spans::SpanState> Eq for Arena<T, S> {}
 /// ```
 ///
 /// Without spans:
-/// ```
+/// ```ignore
 /// # let v1 = 7usize;
 /// # let v2 = 0usize;
 /// let arena = ewgsl::arena![
@@ -386,7 +393,7 @@ impl<T: Hash + Eq, S: spans::SpanState> Eq for Arena<T, S> {}
 ///     /* ... */
 /// ];
 /// ```
-#[macro_export]
+#[allow(unused_macros)]
 macro_rules! arena {
     (
         $($span:expr => $item:expr),* $(,)?
@@ -409,17 +416,13 @@ macro_rules! arena {
         ])
     }};
 }
-pub use arena;
+#[allow(unused_imports)]
+pub(crate) use arena;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn empty_handle_range_is_empty() {
-        let empty = empty_handle_range::<u8>();
-        assert!(empty.start.index >= empty.end.index)
-    }
     #[test]
     fn append_non_unique() {
         let mut arena: Arena<u8, spans::SpansErased> = Arena::new();
@@ -436,5 +439,21 @@ mod tests {
         let t2 = arena.append(1.into());
         assert!(t1.index != t2.index);
         assert!(arena[t1] != arena[t2]);
+    }
+
+    #[test]
+    fn append_none_gives_empty_range() {
+        let mut arena: Arena<u8, spans::SpansErased> = Arena::new();
+        let res = arena.append_all(vec![]);
+        assert!(res.start.index >= res.end.index)
+    }
+
+    #[test]
+    fn append_none_gives_single_element_range() {
+        let mut arena: Arena<u8, spans::SpansErased> = Arena::new();
+        let res = arena.append_all(vec![10u8.into()]);
+        assert!(res.start.index.saturating_add(1) == res.end.index);
+        assert!(arena[res.clone()].len() == 1);
+        assert!(arena[res][0] == 10u8.into())
     }
 }

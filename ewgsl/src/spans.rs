@@ -186,7 +186,7 @@ impl<T: Debug, S: SpanState> Debug for WithSpan<T, S> {
 }
 
 /// Indicates that an object has span information that can be stripped.
-pub trait Spanned {
+pub(crate) trait Spanned {
     type Spanless;
 
     fn erase_spans(self) -> Self::Spanless;
