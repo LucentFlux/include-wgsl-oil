@@ -1,14 +1,16 @@
-use std::{mem::discriminant, ops::Range};
+use std::ops::Range;
 
 use perfect_derive::perfect_derive;
 
 use crate::{
-    arena::{Arena, Handle},
+    arena::Handle,
     spans::{self, Spanned, WithSpan},
-    EqIn,
 };
 
 use super::ident::TemplatedIdent;
+
+#[cfg(feature = "eq")]
+use crate::EqIn;
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub enum BinaryOperator {
@@ -143,16 +145,17 @@ pub struct CallPhrase<'a, S: spans::SpanState = spans::SpansPresent> {
     pub args: Range<Handle<Expression<'a, S>>>,
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for CallPhrase<'a, S> {
-    type Context<'b> = Arena<Expression<'a, S>, S>
+    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S>
     where
         'a: 'b;
 
     fn eq_in(
         &self,
-        lhs_arena: &Arena<Expression<'a, S>, S>,
+        lhs_arena: &crate::arena::Arena<Expression<'a, S>, S>,
         rhs: &Self,
-        rhs_arena: &Arena<Expression<'a, S>, S>,
+        rhs_arena: &crate::arena::Arena<Expression<'a, S>, S>,
     ) -> bool {
         if !self.ident.eq_in(lhs_arena, &rhs.ident, rhs_arena) {
             return false;
@@ -174,8 +177,10 @@ impl<'a, S: spans::SpanState> EqIn<'a> for CallPhrase<'a, S> {
 }
 
 impl<'a> Spanned for CallPhrase<'a> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = CallPhrase<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         CallPhrase {
             ident: self.ident.erase_spans(),
@@ -222,12 +227,14 @@ const _: () = {
     fn assert_clone<T: Clone>() {}
     fn assert_all() {
         assert_clone::<Expression<'static, spans::SpansPresent>>();
+        #[cfg(feature = "span_erasure")]
         assert_clone::<Expression<'static, spans::SpansErased>>();
     }
 };
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Expression<'a, S>> {
-    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -241,8 +248,9 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Expression<'a, S>> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for Range<Handle<Expression<'a, S>>> {
-    type Context<'b> = Arena<Expression<'a, S>, S>
+    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S>
     where
         'a: 'b;
 
@@ -268,8 +276,9 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Range<Handle<Expression<'a, S>>> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for Expression<'a, S> {
-    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -277,7 +286,7 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Expression<'a, S> {
         other: &'b Self,
         other_context: &'b Self::Context<'b>,
     ) -> bool {
-        if discriminant(self) != discriminant(other) {
+        if std::mem::discriminant(self) != std::mem::discriminant(other) {
             return false;
         }
 
@@ -355,8 +364,10 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Expression<'a, S> {
 }
 
 impl<'a> Spanned for Expression<'a, spans::SpansPresent> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = Expression<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         match self {
             Expression::Literal { value } => Expression::Literal { value },

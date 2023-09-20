@@ -2,7 +2,12 @@
 ![crates.io](https://img.shields.io/crates/v/ewgsl.svg)
 ![crates.io](https://img.shields.io/crates/l/ewgsl.svg)
 
-A comprehensive Rust integration WGSL preprocessor, with support for imports, Rust code generation and more.
+#### A comprehensive extension of WGSL, with support for imports, host language code generation and more.
+
+This crate provides the parser of the EWGSL language. It also provides the following optional features which can be enabled with feature flags:
+
+- `eq` implements `PartialEq` and `Eq` for `ParsedModule`s. 
+- `span_erasure` allows you to call `erase_spans` on `ParsedModule`s, stripping all span information. This is useful in conjunction with the `eq` flag to check if two modules are equivalent once parsed, ignoring whitespace and comments. 
 
 # Motivation
 

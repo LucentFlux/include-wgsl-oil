@@ -124,6 +124,7 @@ fn get_recommended_alternative<'a>(found: &str, alternatives: &[&'a str]) -> Opt
 }
 
 /// Like [`Eq`], but for objects which refer into some sort of context, such as handles into arenas.
+#[cfg(feature = "eq")]
 pub(crate) trait EqIn<'a>: 'a {
     type Context<'b>
     where
@@ -137,6 +138,7 @@ pub(crate) trait EqIn<'a>: 'a {
     ) -> bool;
 }
 
+#[cfg(feature = "eq")]
 impl<'a, T: EqIn<'a>> EqIn<'a> for Option<T> {
     type Context<'b> = T::Context<'b> where 'a: 'b;
 

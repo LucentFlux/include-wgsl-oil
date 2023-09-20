@@ -1,10 +1,12 @@
 use crate::{
-    arena::{Arena, Handle},
+    arena::Handle,
     spans::{self, Spanned},
-    EqIn,
 };
 
 use super::expression::Expression;
+
+#[cfg(feature = "eq")]
+use crate::EqIn;
 
 #[derive(Debug)]
 pub struct ConstAssertStatement<'a, S: spans::SpanState = spans::SpansPresent> {
@@ -12,8 +14,10 @@ pub struct ConstAssertStatement<'a, S: spans::SpanState = spans::SpansPresent> {
 }
 
 impl<'a> Spanned for ConstAssertStatement<'a> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = ConstAssertStatement<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         ConstAssertStatement {
             expr: self.expr.erase_spans(),
@@ -21,8 +25,9 @@ impl<'a> Spanned for ConstAssertStatement<'a> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for ConstAssertStatement<'a, S> {
-    type Context<'b> = Arena<Expression<'a, S>, S>
+    type Context<'b> = crate::arena::Arena<super::expression::Expression<'a, S>, S>
     where
         'a: 'b;
 

@@ -1,10 +1,9 @@
-use crate::{
-    arena::Arena,
-    spans::{self, Spanned},
-    EqIn,
-};
+use crate::spans::{self, Spanned};
 
-use super::{expression::Expression, ident::Ident, variables::TypeSpecifier};
+use super::{ident::Ident, variables::TypeSpecifier};
+
+#[cfg(feature = "eq")]
+use crate::EqIn;
 
 /// A type alias expression, such as `alias MyVec3 = vec3<u32>;`
 #[derive(Debug)]
@@ -14,8 +13,10 @@ pub struct TypeAliasDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
 }
 
 impl<'a> Spanned for TypeAliasDeclaration<'a, spans::SpansPresent> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = TypeAliasDeclaration<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         TypeAliasDeclaration {
             ident: self.ident.erase_spans(),
@@ -24,8 +25,9 @@ impl<'a> Spanned for TypeAliasDeclaration<'a, spans::SpansPresent> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for TypeAliasDeclaration<'a, S> {
-    type Context<'b> = Arena<Expression<'a, S>, S>
+    type Context<'b> = crate::arena::Arena<super::expression::Expression<'a, S>, S>
     where
         'a: 'b;
 

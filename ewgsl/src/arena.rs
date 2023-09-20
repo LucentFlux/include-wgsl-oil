@@ -51,8 +51,10 @@ impl<T> Handle<T> {
 }
 
 impl<T: Spanned> Spanned for Handle<T> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = Handle<T::Spanless>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         Handle {
             index: self.index,
@@ -305,10 +307,12 @@ impl<T, S: spans::SpanState> Arena<T, S> {
     }
 }
 
-impl<T> Arena<T, spans::SpansPresent> {
-    /// Remove all of the span information from this module. Useful when testing semantic equivalence
-    /// of two modules. See [`crate::parsing::ParsedModule::erase_spans`]
-    pub fn erase_spans(self) -> Arena<T, spans::SpansErased> {
+impl<T> Spanned for Arena<T, spans::SpansPresent> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = Arena<T, spans::SpansErased>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
         Arena {
             data: self.data.into_iter().map(|vs| vs.erase_spans()).collect(),
         }

@@ -2,7 +2,7 @@ use perfect_derive::perfect_derive;
 use std::str::FromStr;
 use strum::VariantNames;
 
-use crate::{arena::Arena, join_into_readable_list};
+use crate::{arena::Arena, join_into_readable_list, spans::Spanned};
 
 use super::spans;
 
@@ -156,20 +156,12 @@ impl<S: spans::SpanState> Directives<S> {
     }
 }
 
-impl Directives<spans::SpansPresent> {
-    /// Remove all of the span information from these directives. Useful when testing semantic equivalence
-    /// of objects:
-    ///
-    /// ```rust
-    /// # use ewgsl::parsing::ParsedModule;
-    ///
-    /// let mod1 = ParsedModule::parse("shader1.ewgsl", "diagnostic off;").unwrap();
-    /// let mod2 = ParsedModule::parse("shader2.ewgsl", "   diagnostic     off   ; ").unwrap();
-    ///
-    /// assert!(mod1 != mod2);
-    /// assert!(mod1.erase_spans() == mod2.erase_spans());
-    /// ```
-    pub fn erase_spans(self) -> Directives<spans::SpansErased> {
+impl Spanned for Directives<spans::SpansPresent> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = Directives<spans::SpansErased>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
         Directives {
             diagnostics: self.diagnostics.erase_spans(),
             enable_extensions: self.enable_extensions.erase_spans(),

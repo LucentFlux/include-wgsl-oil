@@ -1,8 +1,6 @@
 use perfect_derive::perfect_derive;
 use std::{fmt::Debug, hash::Hash, marker::PhantomData, ops::Range};
 
-use crate::EqIn;
-
 /// A start (inclusive) and end (exclusive) within a given string marking the location of some text of interest.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span {
@@ -71,6 +69,7 @@ impl Debug for Span {
 pub struct SpansPresent(());
 /// Marker type denoting that this object's spans have been erased.
 #[derive(Debug)]
+#[cfg(feature = "span_erasure")]
 pub struct SpansErased(());
 
 mod sealed {
@@ -78,6 +77,7 @@ mod sealed {
 
     pub trait SpanStateSealed {}
     impl SpanStateSealed for SpansPresent {}
+    #[cfg(feature = "span_erasure")]
     impl SpanStateSealed for SpansErased {}
 }
 
@@ -89,6 +89,7 @@ pub trait SpanState: sealed::SpanStateSealed + 'static {
 impl SpanState for SpansPresent {
     const SPANS_PRESENT: bool = true;
 }
+#[cfg(feature = "span_erasure")]
 impl SpanState for SpansErased {
     const SPANS_PRESENT: bool = false;
 }
@@ -137,9 +138,18 @@ impl<T> WithSpan<T> {
     }
 }
 
+impl<T: Spanned, S: SpanState> WithSpan<T, S> {
+    #[cfg(feature = "span_erasure")]
+    pub fn erase_inner_spans(self) -> WithSpan<T::Spanless, S> {
+        self.map(T::erase_spans)
+    }
+}
+
 impl<T> Spanned for WithSpan<T> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = WithSpan<T, SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         WithSpan {
             inner: self.inner,
@@ -149,7 +159,8 @@ impl<T> Spanned for WithSpan<T> {
     }
 }
 
-impl<'a, T: EqIn<'a>, S: SpanState> EqIn<'a> for WithSpan<T, S> {
+#[cfg(feature = "eq")]
+impl<'a, T: crate::EqIn<'a>, S: SpanState> crate::EqIn<'a> for WithSpan<T, S> {
     type Context<'b> = T::Context<'b> where 'a: 'b;
 
     fn eq_in<'b>(
@@ -162,6 +173,7 @@ impl<'a, T: EqIn<'a>, S: SpanState> EqIn<'a> for WithSpan<T, S> {
     }
 }
 
+#[cfg(feature = "span_erasure")]
 impl<T> From<T> for WithSpan<T, SpansErased> {
     fn from(value: T) -> Self {
         Self {
@@ -185,24 +197,40 @@ impl<T: Debug, S: SpanState> Debug for WithSpan<T, S> {
     }
 }
 
-/// Indicates that an object has span information that can be stripped.
+/// Indicates that an object has span information, which can be stripped if the `erase_spans` feature is enabled.
 pub(crate) trait Spanned {
+    #[cfg(feature = "span_erasure")]
     type Spanless;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless;
 }
 
+impl<T: Spanned> Spanned for Option<T> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = Option<T::Spanless>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
+        self.map(T::erase_spans)
+    }
+}
+
 impl<T: Spanned> Spanned for Vec<T> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = Vec<T::Spanless>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         self.into_iter().map(T::erase_spans).collect()
     }
 }
 
 impl<T: Spanned> Spanned for Range<T> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = Range<T::Spanless>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         self.start.erase_spans()..self.end.erase_spans()
     }

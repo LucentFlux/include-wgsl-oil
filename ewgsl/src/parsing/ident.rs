@@ -3,12 +3,14 @@ use std::ops::{Deref, Range};
 use perfect_derive::perfect_derive;
 
 use crate::{
-    arena::{Arena, Handle},
+    arena::Handle,
     spans::{self, Spanned},
-    EqIn,
 };
 
 use super::expression::Expression;
+
+#[cfg(feature = "eq")]
+use crate::EqIn;
 
 const KEYWORDS: [&'static str; 26] = [
     "alias",
@@ -248,8 +250,9 @@ pub struct TemplatedIdent<'a, S: spans::SpanState = spans::SpansPresent> {
     pub args: Range<Handle<Expression<'a, S>>>,
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
-    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+    type Context<'b> = crate::arena::Arena<super::expression::Expression<'a, S>, S> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -270,8 +273,10 @@ impl<'a, S: spans::SpanState> EqIn<'a> for TemplatedIdent<'a, S> {
 }
 
 impl<'a> Spanned for TemplatedIdent<'a, spans::SpansPresent> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = TemplatedIdent<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         TemplatedIdent {
             ident: self.ident.erase_spans(),

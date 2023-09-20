@@ -3,8 +3,6 @@ name = "ewgsl"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 pest = "2.7"
 pest_derive = "2.7"
@@ -16,3 +14,10 @@ perfect-derive = "0.1"
 
 [dev-dependencies]
 rstest = "0.18.2"
+# We depend on our own package so that we can enable non-default features that the tests need
+ewgsl = { path = ".", default-features = false, features = ["eq", "span_erasure"] } 
+
+[features]
+default = [] 
+eq = []
+span_erasure = []

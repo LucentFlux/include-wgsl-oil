@@ -1,14 +1,14 @@
 use std::ops::Range;
 
 use crate::{
-    arena::{Arena, Handle},
+    arena::Handle,
     spans::{self, Spanned, WithSpan},
-    EqIn,
 };
 
-use super::{
-    attributes::Attribute, expression::Expression, ident::Ident, variables::TypeSpecifier,
-};
+use super::{attributes::Attribute, ident::Ident, variables::TypeSpecifier};
+
+#[cfg(feature = "eq")]
+use crate::EqIn;
 
 #[derive(Debug)]
 pub struct StructMember<'a, S: spans::SpanState = spans::SpansPresent> {
@@ -18,8 +18,10 @@ pub struct StructMember<'a, S: spans::SpanState = spans::SpansPresent> {
 }
 
 impl<'a> Spanned for StructMember<'a> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = StructMember<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         StructMember {
             attributes: self.attributes.erase_spans(),
@@ -29,8 +31,9 @@ impl<'a> Spanned for StructMember<'a> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for StructMember<'a, S> {
-    type Context<'b> = (&'b Arena<Attribute<'a, S>, S>, &'b Arena<Expression<'a, S>, S>)
+    type Context<'b> = (&'b crate::arena::Arena<Attribute<'a, S>, S>, &'b crate::arena::Arena<super::expression::Expression<'a, S>, S>)
     where
         'a: 'b;
 
@@ -70,8 +73,10 @@ pub struct StructDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
 }
 
 impl<'a> Spanned for StructDeclaration<'a> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = StructDeclaration<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         StructDeclaration {
             ident: self.ident.erase_spans(),
@@ -80,8 +85,9 @@ impl<'a> Spanned for StructDeclaration<'a> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for StructDeclaration<'a, S> {
-    type Context<'b> = (&'b Arena<Attribute<'a, S>, S>, &'b Arena<Expression<'a, S>, S>, &'b Arena<StructMember<'a, S>, S>)
+    type Context<'b> = (&'b crate::arena::Arena<Attribute<'a, S>, S>, &'b crate::arena::Arena<super::expression::Expression<'a, S>, S>, &'b crate::arena::Arena<StructMember<'a, S>, S>)
     where
         'a: 'b;
 

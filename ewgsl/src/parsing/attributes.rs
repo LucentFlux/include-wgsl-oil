@@ -1,14 +1,16 @@
-use std::{mem::discriminant, ops::Range, str::FromStr};
+use std::{ops::Range, str::FromStr};
 use strum::VariantNames;
 
 use crate::{
-    arena::{Arena, Handle},
+    arena::Handle,
     join_into_readable_list,
     spans::{self, Spanned, WithSpan},
-    EqIn,
 };
 
 use super::{expression::Expression, ParsedModule};
+
+#[cfg(feature = "eq")]
+use crate::EqIn;
 
 #[derive(Debug, Clone, strum::EnumDiscriminants)]
 #[strum_discriminants(derive(
@@ -112,8 +114,10 @@ impl AttributeIdentifier {
 }
 
 impl<'a> Spanned for AttributeInner<'a> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = AttributeInner<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         match self {
             AttributeInner::Align(h) => AttributeInner::Align(h.erase_spans()),
@@ -245,15 +249,16 @@ impl<'a> Attribute<'a> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> Attribute<'a, S> {
     /// Checks that two sets of attributes are equivalent. Currently O(n^2) but fast because we assume things will have small amounts of attributes.
     pub fn are_sets_eq_in(
         lhs: Range<Handle<Self>>,
-        lhs_context_1: &Arena<Self, S>,
-        lhs_context_2: &Arena<Expression<'a, S>, S>,
+        lhs_context_1: &crate::arena::Arena<Self, S>,
+        lhs_context_2: &crate::arena::Arena<Expression<'a, S>, S>,
         rhs: Range<Handle<Self>>,
-        rhs_context_1: &Arena<Self, S>,
-        rhs_context_2: &Arena<Expression<'a, S>, S>,
+        rhs_context_1: &crate::arena::Arena<Self, S>,
+        rhs_context_2: &crate::arena::Arena<Expression<'a, S>, S>,
     ) -> bool {
         let lhs_attributes = &lhs_context_1[lhs];
         let mut lhs_attributes = lhs_attributes.into_iter().collect::<Vec<_>>();
@@ -276,8 +281,10 @@ impl<'a, S: spans::SpanState> Attribute<'a, S> {
 }
 
 impl<'a> Spanned for Attribute<'a> {
+    #[cfg(feature = "span_erasure")]
     type Spanless = Attribute<'a, spans::SpansErased>;
 
+    #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         Attribute {
             identifier_span: spans::Span::empty(),
@@ -286,8 +293,9 @@ impl<'a> Spanned for Attribute<'a> {
     }
 }
 
+#[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for Attribute<'a, S> {
-    type Context<'b> = Arena<Expression<'a, S>, S> where 'a: 'b;
+    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -296,6 +304,10 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Attribute<'a, S> {
         other_context: &'b Self::Context<'b>,
     ) -> bool {
         if self.identifier_span != other.identifier_span {
+            return false;
+        }
+
+        if std::mem::discriminant(&self.inner) != std::mem::discriminant(&other.inner) {
             return false;
         }
 
@@ -370,8 +382,7 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Attribute<'a, S> {
             | (AttributeInner::Fragment, AttributeInner::Fragment)
             | (AttributeInner::Compute, AttributeInner::Compute) => true,
 
-            (lhs, rhs) if discriminant(lhs) != discriminant(rhs) => return false,
-            _ => unimplemented!(),
+            _ => unreachable!(),
         }
     }
 }
