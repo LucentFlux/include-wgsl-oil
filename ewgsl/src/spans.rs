@@ -138,9 +138,12 @@ impl<T> WithSpan<T> {
     }
 }
 
-impl<T: Spanned, S: SpanState> WithSpan<T, S> {
+impl<T, S: SpanState> WithSpan<T, S> {
     #[cfg(feature = "span_erasure")]
-    pub fn erase_inner_spans(self) -> WithSpan<T::Spanless, S> {
+    pub(crate) fn erase_inner_spans(self) -> WithSpan<T::Spanless, S>
+    where
+        T: Spanned,
+    {
         self.map(T::erase_spans)
     }
 }

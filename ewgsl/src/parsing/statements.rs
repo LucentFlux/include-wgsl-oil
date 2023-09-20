@@ -5,7 +5,7 @@ use crate::{
     spans::{self, Spanned},
 };
 
-use super::{attributes::Attribute, expression::Expression};
+use super::{attributes::Attribute, expression::Expression, ParsedModule};
 
 #[cfg(feature = "eq")]
 use crate::EqIn;
@@ -41,11 +41,67 @@ impl<'a, S: spans::SpanState> EqIn<'a> for IfClause<'a, S> {
         other: &'b Self,
         other_context: &'b Self::Context<'b>,
     ) -> bool {
-        if !self.condition.eq_in(own_context.1, &other.condition, other_context.1) {
+        if !self.condition.eq_in(
+            &own_context.expressions,
+            &other.condition,
+            &other_context.expressions,
+        ) {
             return false;
         }
 
-        if !self.body.eq_in(own_context, &other.body, other_context){
+        if !self.body.eq_in(own_context, &other.body, other_context) {
+            return false;
+        }
+
+        return true;
+    }
+}
+#[derive(Debug)]
+pub struct SwitchClause<'a, S: spans::SpanState = spans::SpansPresent> {
+    pub default_keyword: Option<spans::Span>,
+    pub selectors: Range<Handle<Expression<'a, S>>>,
+    pub body: Range<Handle<Statement<'a, S>>>,
+}
+
+impl<'a> Spanned for SwitchClause<'a> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = SwitchClause<'a, spans::SpansErased>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
+        SwitchClause {
+            default_keyword: self.default_keyword.map(|_| spans::Span::empty()),
+            selectors: self.selectors.erase_spans(),
+            body: self.body.erase_spans(),
+        }
+    }
+}
+
+#[cfg(feature = "eq")]
+impl<'a, S: spans::SpanState> EqIn<'a> for SwitchClause<'a, S> {
+    type Context<'b> = <Statement<'a, S> as EqIn<'a>>::Context<'b>
+    where
+        'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        if self.default_keyword != other.default_keyword {
+            return false;
+        }
+
+        if !self.selectors.eq_in(
+            &own_context.expressions,
+            &other.selectors,
+            &other_context.expressions,
+        ) {
+            return false;
+        }
+
+        if !self.body.eq_in(own_context, &other.body, other_context) {
             return false;
         }
 
@@ -61,6 +117,11 @@ pub enum Statement<'a, S: spans::SpanState = spans::SpansPresent> {
         /// A sequence of if bodies
         ifs: Range<Handle<IfClause<'a, S>>>,
         else_body: Option<spans::WithSpan<Range<Handle<Statement<'a, S>>>, S>>,
+    },
+    Switch {
+        attributes: Range<Handle<Attribute<'a, S>>>,
+        expression: Handle<Expression<'a, S>>,
+        clauses: Range<Handle<SwitchClause<'a, S>>>,
     },
 }
 
@@ -79,7 +140,18 @@ impl<'a> Spanned for Statement<'a> {
             } => Statement::If {
                 attributes: attributes.erase_spans(),
                 ifs: ifs.erase_spans(),
-                else_body: else_body.erase_spans().map(|else_body| else_body.erase_inner_spans()),
+                else_body: else_body
+                    .erase_spans()
+                    .map(|else_body| else_body.erase_inner_spans()),
+            },
+            Statement::Switch {
+                attributes,
+                clauses,
+                expression,
+            } => Statement::Switch {
+                attributes: attributes.erase_spans(),
+                expression: expression.erase_spans(),
+                clauses: clauses.erase_spans(),
             },
         }
     }
@@ -87,12 +159,7 @@ impl<'a> Spanned for Statement<'a> {
 
 #[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for Statement<'a, S> {
-    type Context<'b> = (
-        &'b crate::arena::Arena<super::attributes::Attribute<'a, S>, S>, 
-        &'b crate::arena::Arena<super::expression::Expression<'a, S>, S>, 
-        &'b crate::arena::Arena<Statement<'a, S>, S>, 
-        &'b crate::arena::Arena<IfClause<'a, S>, S>
-    )
+    type Context<'b> = ParsedModule<'a, S>
     where
         'a: 'b;
 
@@ -108,7 +175,7 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Statement<'a, S> {
 
         match (self, other) {
             (Statement::Return(lhs), Statement::Return(rhs)) => {
-                lhs.eq_in(own_context.1, rhs, other_context.1)
+                lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions)
             }
             (
                 Statement::If {
@@ -124,11 +191,11 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Statement<'a, S> {
             ) => {
                 if !Attribute::are_sets_eq_in(
                     lhs_attributes.clone(),
-                    own_context.0,
-                    own_context.1,
+                    &own_context.attributes,
+                    &own_context.expressions,
                     rhs_attributes.clone(),
-                    other_context.0,
-                    other_context.1,
+                    &other_context.attributes,
+                    &other_context.expressions,
                 ) {
                     return false;
                 }
@@ -137,12 +204,57 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Statement<'a, S> {
                     return false;
                 }
 
-                let lhs_ifs = &own_context.3[lhs_ifs.clone()];
-                let rhs_ifs = &other_context.3[rhs_ifs.clone()];
+                let lhs_ifs = &own_context.if_clauses[lhs_ifs.clone()];
+                let rhs_ifs = &other_context.if_clauses[rhs_ifs.clone()];
                 if lhs_ifs.len() != rhs_ifs.len() {
                     return false;
                 }
                 for (lhs, rhs) in lhs_ifs.into_iter().zip(rhs_ifs) {
+                    if !lhs.eq_in(own_context, rhs, other_context) {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+            (
+                Statement::Switch {
+                    attributes: lhs_attributes,
+                    expression: lhs_expression,
+                    clauses: lhs_clauses,
+                },
+                Statement::Switch {
+                    attributes: rhs_attributes,
+                    expression: rhs_expression,
+                    clauses: rhs_clauses,
+                },
+            ) => {
+                if !Attribute::are_sets_eq_in(
+                    lhs_attributes.clone(),
+                    &own_context.attributes,
+                    &own_context.expressions,
+                    rhs_attributes.clone(),
+                    &other_context.attributes,
+                    &other_context.expressions,
+                ) {
+                    return false;
+                }
+
+                if !lhs_expression.eq_in(
+                    &own_context.expressions,
+                    rhs_expression,
+                    &other_context.expressions,
+                ) {
+                    return false;
+                }
+
+                let lhs_clauses = &own_context.switch_clauses[lhs_clauses.clone()];
+                let rhs_clauses = &other_context.switch_clauses[rhs_clauses.clone()];
+
+                if lhs_clauses.len() != rhs_clauses.len() {
+                    return false;
+                }
+                for (lhs, rhs) in lhs_clauses.into_iter().zip(rhs_clauses) {
                     if !lhs.eq_in(own_context, rhs, other_context) {
                         return false;
                     }
@@ -167,8 +279,8 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Statement<'a, S>> {
         other: &'b Self,
         other_context: &'b Self::Context<'b>,
     ) -> bool {
-        let lhs = &own_context.2[*self];
-        let rhs = &other_context.2[*other];
+        let lhs = &own_context.statements[*self];
+        let rhs = &other_context.statements[*other];
         return lhs.eq_in(own_context, rhs, other_context);
     }
 }
@@ -185,8 +297,8 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Range<Handle<Statement<'a, S>>> {
         other: &'b Self,
         other_context: &'b Self::Context<'b>,
     ) -> bool {
-        let lhs_args = &own_context.2[self.clone()];
-        let rhs_args = &other_context.2[other.clone()];
+        let lhs_args = &own_context.statements[self.clone()];
+        let rhs_args = &other_context.statements[other.clone()];
         if lhs_args.len() != rhs_args.len() {
             return false;
         }

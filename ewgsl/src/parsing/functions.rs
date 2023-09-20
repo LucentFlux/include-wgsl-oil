@@ -7,7 +7,10 @@ use crate::{
 
 use super::{
     attributes::Attribute,
-    ident::{Ident, TemplatedIdent}, statements::Statement,
+    ident::{Ident, TemplatedIdent},
+    statements::Statement,
+    variables::TypeSpecifier,
+    ParsedModule,
 };
 
 #[cfg(feature = "eq")]
@@ -17,7 +20,7 @@ use crate::EqIn;
 pub struct Parameter<'a, S: spans::SpanState = spans::SpansPresent> {
     pub attributes: Range<Handle<Attribute<'a, S>>>,
     pub ident: WithSpan<Ident<'a>, S>,
-    pub ty: TemplatedIdent<'a, S>,
+    pub ty: TypeSpecifier<'a, S>,
 }
 
 impl<'a> Spanned for Parameter<'a> {
@@ -55,10 +58,10 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Parameter<'a, S> {
         }
 
         if !Attribute::are_sets_eq_in(
-            self.attributes,
+            self.attributes.clone(),
             own_context.0,
             own_context.1,
-            other.attributes,
+            other.attributes.clone(),
             other_context.0,
             other_context.1,
         ) {
@@ -105,10 +108,10 @@ impl<'a, S: spans::SpanState> EqIn<'a> for FunctionResult<'a, S> {
         }
 
         if !Attribute::are_sets_eq_in(
-            self.attributes,
+            self.attributes.clone(),
             own_context.0,
             own_context.1,
-            other.attributes,
+            other.attributes.clone(),
             other_context.0,
             other_context.1,
         ) {
@@ -167,8 +170,8 @@ impl<'a, S: spans::SpanState> EqIn<'a> for FunctionHeader<'a, S> {
             return false;
         }
 
-        let lhs_paramenters = &own_context.2[self.parameters];
-        let rhs_paramenters = &other_context.2[other.parameters];
+        let lhs_paramenters = &own_context.2[self.parameters.clone()];
+        let rhs_paramenters = &other_context.2[other.parameters.clone()];
         if lhs_paramenters.len() != rhs_paramenters.len() {
             return false;
         }
@@ -209,13 +212,7 @@ impl<'a> Spanned for FunctionDeclaration<'a> {
 
 #[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for FunctionDeclaration<'a, S> {
-    type Context<'b> = (
-        &'b crate::arena::Arena<Attribute<'a, S>, S>, 
-        &'b crate::arena::Arena<super::expression::Expression<'a, S>, S>, 
-        &'b crate::arena::Arena<Parameter<'a, S>, S>, 
-        &'b crate::arena::Arena<super::statements::Statement<'a, S>, S>, 
-        &'b crate::arena::Arena<super::statements::IfClause<'a, S>, S>
-    )
+    type Context<'b> = ParsedModule<'a, S>
     where
         'a: 'b;
 
@@ -226,28 +223,34 @@ impl<'a, S: spans::SpanState> EqIn<'a> for FunctionDeclaration<'a, S> {
         other_context: &'b Self::Context<'b>,
     ) -> bool {
         if !self.header.eq_in(
-            &(own_context.0, own_context.1, own_context.2),
+            &(
+                &own_context.attributes,
+                &own_context.expressions,
+                &own_context.parameters,
+            ),
             &other.header,
-            &(other_context.0, other_context.1, other_context.2),
+            &(
+                &other_context.attributes,
+                &other_context.expressions,
+                &other_context.parameters,
+            ),
         ) {
             return false;
         }
 
         if !Attribute::are_sets_eq_in(
-            self.attributes,
-            own_context.0,
-            own_context.1,
-            other.attributes,
-            other_context.0,
-            other_context.1,
+            self.attributes.clone(),
+            &own_context.attributes,
+            &own_context.expressions,
+            other.attributes.clone(),
+            &other_context.attributes,
+            &other_context.expressions,
         ) {
             return false;
         }
 
         // Exactly equal statements, in order.
-        let our_body_context = &(own_context.0, own_context.1, own_context.3, own_context.4);
-        let other_body_context = &(own_context.0, own_context.1, own_context.3, own_context.4);
-        if !self.body.eq_in(our_body_context, &other.body, other_body_context) {
+        if !self.body.eq_in(own_context, &other.body, other_context) {
             return false;
         }
 

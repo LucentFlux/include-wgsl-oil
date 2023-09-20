@@ -46,7 +46,7 @@ use self::{
     expression::Expression,
     functions::{FunctionResult, Parameter},
     ident::{Ident, TemplatedIdent},
-    statements::{Statement, IfClause},
+    statements::{IfClause, Statement, SwitchClause},
     structs::{StructDeclaration, StructMember},
     variables::{GlobalConstantDeclaration, GlobalOverrideDeclaration},
 };
@@ -152,7 +152,6 @@ impl Display for parser::Rule {
             parser::Rule::CASE_KEYWORD => "`case` keyword",
             parser::Rule::CASE_CLAUSE => "case clause",
             parser::Rule::SWITCH_CLAUSE => "switch clause",
-            parser::Rule::SWITCH_BODY => "switch body",
             parser::Rule::SWITCH_KEYWORD => "`switch` keyword",
             parser::Rule::SWITCH_STATEMENT => "switch statement",
             parser::Rule::LOOP_STATEMENT => "loop statement",
@@ -581,14 +580,7 @@ impl<'a> Spanned for GlobalDeclaration<'a> {
 
 #[cfg(feature = "eq")]
 impl<'a, S: spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
-    type Context<'b> = (
-        &'b Arena<Attribute<'a, S>, S>, 
-        &'b Arena<Expression<'a, S>, S>, 
-        &'b Arena<StructMember<'a, S>, S>, 
-        &'b Arena<Parameter<'a, S>, S>, 
-        &'b Arena<Statement<'a, S>, S>,
-        &'b Arena<IfClause<'a, S>, S>,
-    )
+    type Context<'b> = ParsedModule<'a, S>
     where
         'a: 'b;
 
@@ -604,40 +596,40 @@ impl<'a, S: spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
 
         match (self, other) {
             (GlobalDeclaration::Variable(lhs), GlobalDeclaration::Variable(rhs)) => lhs.eq_in(
-                &(own_context.0, own_context.1),
+                &(&own_context.attributes, &own_context.expressions),
                 rhs,
-                &(other_context.0, other_context.1),
+                &(&other_context.attributes, &other_context.expressions),
             ),
             (GlobalDeclaration::Constant(lhs), GlobalDeclaration::Constant(rhs)) => {
-                lhs.eq_in(own_context.1, rhs, other_context.1)
+                lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions)
             }
             (GlobalDeclaration::Override(lhs), GlobalDeclaration::Override(rhs)) => lhs.eq_in(
-                &(own_context.0, own_context.1),
+                &(&own_context.attributes, &own_context.expressions),
                 rhs,
-                &(other_context.0, other_context.1),
+                &(&other_context.attributes, &other_context.expressions),
             ),
             (GlobalDeclaration::Alias(lhs), GlobalDeclaration::Alias(rhs)) => {
-                lhs.eq_in(own_context.1, rhs, other_context.1)
+                lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions)
             }
             (GlobalDeclaration::Struct(lhs), GlobalDeclaration::Struct(rhs)) => lhs.eq_in(
-                &(own_context.0, own_context.1, own_context.2),
-                rhs,
-                &(other_context.0, other_context.1, other_context.2),
-            ),
-            (GlobalDeclaration::ConstAssert(lhs), GlobalDeclaration::ConstAssert(rhs)) => {
-                lhs.eq_in(own_context.1, rhs, other_context.1)
-            }
-            (GlobalDeclaration::Function(lhs), GlobalDeclaration::Function(rhs)) => lhs.eq_in(
-                &(own_context.0, own_context.1, own_context.3, own_context.4, own_context.5),
+                &(
+                    &own_context.attributes,
+                    &own_context.expressions,
+                    &own_context.members,
+                ),
                 rhs,
                 &(
-                    other_context.0,
-                    other_context.1,
-                    other_context.3,
-                    other_context.4,
-                    other_context.5,
+                    &other_context.attributes,
+                    &other_context.expressions,
+                    &other_context.members,
                 ),
             ),
+            (GlobalDeclaration::ConstAssert(lhs), GlobalDeclaration::ConstAssert(rhs)) => {
+                lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions)
+            }
+            (GlobalDeclaration::Function(lhs), GlobalDeclaration::Function(rhs)) => {
+                lhs.eq_in(own_context, rhs, other_context)
+            }
             _ => unreachable!(),
         }
     }
@@ -652,6 +644,7 @@ pub struct ParsedModule<'a, S: spans::SpanState = spans::SpansPresent> {
     pub members: Arena<StructMember<'a, S>, S>,
     pub parameters: Arena<Parameter<'a, S>, S>,
     pub if_clauses: Arena<IfClause<'a, S>, S>,
+    pub switch_clauses: Arena<SwitchClause<'a, S>, S>,
     pub statements: Arena<Statement<'a, S>, S>,
     pub declarations: Arena<GlobalDeclaration<'a, S>, S>,
 }
@@ -666,6 +659,7 @@ impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
             members: Arena::new(),
             parameters: Arena::new(),
             if_clauses: Arena::new(),
+            switch_clauses: Arena::new(),
             statements: Arena::new(),
             declarations: Arena::new(),
         }
@@ -2093,7 +2087,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let condition = module.expressions.append(condition);
         let body = module.statements.append_all(body);
-        return Ok(WithSpan::new(IfClause { condition, body }, if_clause_span))
+        return Ok(WithSpan::new(IfClause { condition, body }, if_clause_span));
     }
 
     fn parse_else_if_clause(
@@ -2140,7 +2134,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         }
 
         let body = module.statements.append_all(body);
-        return Ok(WithSpan::new(body, else_clause_span))
+        return Ok(WithSpan::new(body, else_clause_span));
     }
 
     fn parse_if_statement(
@@ -2166,18 +2160,94 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             if_else_if_clauses.push(else_if_clause);
         }
 
-        let else_clause = inner.next().map(|else_clause| Self::parse_else_clause(module, issues, else_clause));
+        let else_clause = inner
+            .next()
+            .map(|else_clause| Self::parse_else_clause(module, issues, else_clause));
 
         // Unroll errors
-        let if_else_if_clauses = if_else_if_clauses.into_iter().collect::<Result<Vec<_>, _>>()?;
+        let if_else_if_clauses = if_else_if_clauses
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
         let if_else_if_clauses = module.if_clauses.append_all(if_else_if_clauses);
 
         let else_clause = match else_clause {
-            None=> None,
-            Some(else_clause) => Some(else_clause?)
+            None => None,
+            Some(else_clause) => Some(else_clause?),
         };
 
-        return Ok(Statement::If { attributes, ifs: if_else_if_clauses, else_body: else_clause })
+        return Ok(Statement::If {
+            attributes,
+            ifs: if_else_if_clauses,
+            else_body: else_clause,
+        });
+    }
+
+    fn parse_switch_clause(
+        module: &mut ParsedModule<'a>,
+        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        clause: Pair<'a, parser::Rule>,
+    ) -> Result<WithSpan<SwitchClause<'a>>, ()> {
+        debug_assert_eq!(clause.as_rule(), parser::Rule::SWITCH_CLAUSE);
+        let clause_span = clause.as_span().into();
+
+        let mut inner = clause.into_inner().next().unwrap().into_inner();
+
+        let keyword = inner.next().unwrap();
+
+        // Parse lhs of case
+        let mut default_keyword = None;
+        let mut selectors = vec![];
+        match keyword.as_rule() {
+            parser::Rule::CASE_KEYWORD => {
+                let case_selectors = inner.next().unwrap();
+                debug_assert_eq!(case_selectors.as_rule(), parser::Rule::CASE_SELECTORS);
+
+                let case_selectors_inner = case_selectors.into_inner();
+
+                for case_selector in case_selectors_inner {
+                    debug_assert_eq!(case_selector.as_rule(), parser::Rule::CASE_SELECTOR);
+
+                    let case_selector = case_selector.into_inner().next().unwrap();
+                    match case_selector.as_rule() {
+                        parser::Rule::DEFAULT_KEYWORD => {
+                            default_keyword = Some(case_selector.as_span().into())
+                        }
+                        parser::Rule::EXPRESSION => {
+                            let case_selector =
+                                Self::parse_expression(module, issues, case_selector);
+                            if let Ok(case_selector) = case_selector {
+                                selectors.push(case_selector)
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            parser::Rule::DEFAULT_KEYWORD => {
+                default_keyword = Some(keyword.as_span().into());
+            }
+            _ => unreachable!(),
+        }
+
+        // Parse body of case
+        let mut body = vec![];
+        for statement in inner {
+            let statement = Self::parse_statement(module, issues, statement);
+            if let Ok(Some(statement)) = statement {
+                body.push(statement);
+            }
+        }
+
+        // Build
+        let selectors = module.expressions.append_all(selectors);
+        let body = module.statements.append_all(body);
+
+        let clause = SwitchClause {
+            default_keyword,
+            selectors,
+            body,
+        };
+        return Ok(WithSpan::new(clause, clause_span));
     }
 
     fn parse_switch_statement(
@@ -2186,6 +2256,35 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::SWITCH_STATEMENT);
+
+        let mut inner = statement.into_inner();
+
+        let attributes = inner.next().unwrap();
+        let attributes = Self::parse_attribute_set(module, issues, attributes);
+
+        let keyword = inner.next().unwrap();
+        debug_assert_eq!(keyword.as_rule(), parser::Rule::SWITCH_KEYWORD);
+
+        let expression = inner.next().unwrap();
+        let expression = Self::parse_expression(module, issues, expression);
+
+        let mut clauses = vec![];
+        for clause in inner {
+            let clause = Self::parse_switch_clause(module, issues, clause);
+            if let Ok(clause) = clause {
+                clauses.push(clause);
+            }
+        }
+        let clauses = module.switch_clauses.append_all(clauses);
+
+        let expression = module.expressions.append(expression?);
+
+        let statement = Statement::Switch {
+            attributes,
+            expression,
+            clauses,
+        };
+        return Ok(statement);
     }
 
     fn parse_loop_statement(
@@ -2194,6 +2293,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::LOOP_STATEMENT);
+
+        unimplemented!()
     }
 
     fn parse_for_statement(
@@ -2202,6 +2303,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::FOR_STATEMENT);
+
+        unimplemented!()
     }
 
     fn parse_while_statement(
@@ -2210,6 +2313,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::WHILE_STATEMENT);
+
+        unimplemented!()
     }
 
     fn parse_variable_or_value_statement(
@@ -2221,6 +2326,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             statement.as_rule(),
             parser::Rule::VARIABLE_OR_VALUE_STATEMENT
         );
+
+        unimplemented!()
     }
 
     fn parse_break_statement(
@@ -2229,6 +2336,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::BREAK_STATEMENT);
+
+        unimplemented!()
     }
 
     fn parse_continue_statement(
@@ -2237,6 +2346,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::CONTINUE_STATEMENT);
+
+        unimplemented!()
     }
 
     fn parse_discard_statement(
@@ -2245,6 +2356,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::DISCARD_KEYWORD);
+
+        unimplemented!()
     }
 
     fn parse_const_assert_statement(
@@ -2253,6 +2366,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::CONST_ASSERT_STATEMENT);
+
+        unimplemented!()
     }
 
     /// Statements surrounded by curly braces
@@ -2262,6 +2377,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::COMPOUND_STATEMENT);
+
+        unimplemented!()
     }
 
     fn parse_variable_updating_statement(
@@ -2273,6 +2390,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             statement.as_rule(),
             parser::Rule::VARIABLE_UPDATING_STATEMENT
         );
+
+        unimplemented!()
     }
 
     fn parse_func_call_statement(
@@ -2281,6 +2400,8 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::FUNC_CALL_STATEMENT);
+
+        unimplemented!()
     }
 
     /// Any statement
@@ -2363,7 +2484,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let ident = Self::parse_ident(module, issues, ident);
 
         let ty = inner.next().unwrap();
-        let ty = Self::parse_templated_ident(module, issues, ty);
+        let ty = Self::parse_type_specifier(module, issues, ty);
 
         let next = inner.next();
         debug_assert!(next.is_none());
@@ -2389,7 +2510,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     ) -> Range<Handle<Parameter<'a>>> {
         debug_assert_eq!(params.as_rule(), parser::Rule::PARAM_LIST);
 
-        let mut inner = params.into_inner();
+        let inner = params.into_inner();
         let mut params = vec![];
         for param in inner {
             let param = Self::parse_param(module, issues, param);
@@ -2587,6 +2708,10 @@ impl<'a> Spanned for ParsedModule<'a> {
                 .if_clauses
                 .erase_spans()
                 .map(|clause| clause.erase_spans()),
+            switch_clauses: self
+                .switch_clauses
+                .erase_spans()
+                .map(|clause| clause.erase_spans()),
             statements: self
                 .statements
                 .erase_spans()
@@ -2617,25 +2742,7 @@ where
         }
         'outer: for (_, lhs) in self.declarations.iter() {
             for (_, rhs) in other.declarations.iter() {
-                if lhs.eq_in(
-                    &(
-                        &self.attributes,
-                        &self.expressions,
-                        &self.members,
-                        &self.parameters,
-                        &self.statements,
-                        &self.if_clauses,
-                    ),
-                    rhs,
-                    &(
-                        &other.attributes,
-                        &other.expressions,
-                        &other.members,
-                        &other.parameters,
-                        &other.statements,
-                        &other.if_clauses,
-                    ),
-                ) {
+                if lhs.eq_in(self, rhs, other) {
                     continue 'outer;
                 }
             }
@@ -2731,6 +2838,49 @@ mod tests {
     #[case("const_assert;")]
     #[case("const_assert {}")]
     #[case("const_assert true")]
+    // Invalid functions
+    #[case("fn(){}")]
+    #[case("fn foo()")]
+    #[case("fnfoo(){}")]
+    #[case("fn foo() -> {}")]
+    #[case("fn foo() { invalid_statement; }")]
+    #[case("@badattr fn foo(){}")]
+    #[case("fn foo(a) {}")]
+    #[case("fn foo(a: u32, b) {}")]
+    #[case("fn foo(a: u32,,) {}")]
+    #[case("fn foo(a, b: u32) {}")]
+    #[case("fn foo() -> @badattr out {}")]
+    #[case("fn foo() -> v: out {}")]
+    // Invalid function bodies
+    // Return statements
+    #[case("fn foo() { return }")]
+    #[case("fn foo() { return 12 - }")]
+    #[case("fn foo() { return 12 -; }")]
+    #[case("fn foo() { return return; }")]
+    #[case("fn foo() { return fn; }")]
+    // If statements
+    #[case("fn foo() { if true; }")]
+    #[case("fn foo() { if true {} else; }")]
+    #[case("fn foo() { if true {} else if false; }")]
+    #[case("fn foo() { if true {} else if false {} else; }")]
+    #[case("fn foo() { if (a +) > 3 {} }")]
+    #[case("fn foo() { if (== b) {} }")]
+    #[case("fn foo() { if a != b { invalid_statement; } }")]
+    #[case("fn foo() { if (a != b) { invalid_statement; } }")]
+    #[case("fn foo() { if a != b { } else { invalid_statement; } }")]
+    // Switch statements
+    #[case("fn foo() { switch a {} }")]
+    #[case("fn foo() { switch {} }")]
+    #[case("fn foo() { switch {default {}} }")]
+    #[case("fn foo() { switch {case 3 {}} }")]
+    #[case("fn foo() { switch {case 3 : {}} }")]
+    #[case("fn foo() { switch {case 3, 4 : {}} }")]
+    #[case("fn foo() { switch a { case {} } }")]
+    #[case("fn foo() { switch a { case 3,, {} } }")]
+    #[case("fn foo() { switch a { case 3,, : {} } }")]
+    #[case("fn foo() { switch a { case 2 {}, case {} } }")]
+    #[case("fn foo() { switch a { case 2 {}, case 3,, {} } }")]
+    #[case("fn foo() { switch a { case 2 {}, case 3,, : {} } }")]
     fn parse_invalid_fails(#[case] invalid: &str) {
         assert!(
             ParsedModule::parse("invalid_module_test.ewgsl", invalid).is_err(),
@@ -3404,5 +3554,92 @@ mod tests {
             "const_assert (A + B) != C[3];",
             "const_assert A + B != C[3];",
         );
+    }
+
+    #[test]
+    fn parse_valid_succeeds_case_fn_01() {
+        let src = "fn foo(a: u32, b: f32) -> i32 { return a - b; }";
+
+        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+
+        let empty_attributes = expected_module.attributes.append_all(vec![]);
+
+        let empty_args = expected_module.expressions.append_all(vec![]);
+
+        let parameters = expected_module.parameters.append_all(vec![
+            Parameter {
+                attributes: empty_attributes.clone(),
+                ident: Ident::try_parse("a").unwrap().into(),
+                ty: TypeSpecifier(TemplatedIdent {
+                    ident: Ident::try_parse("u32").unwrap().into(),
+                    args: empty_args.clone(),
+                }),
+            }
+            .into(),
+            Parameter {
+                attributes: empty_attributes.clone(),
+                ident: Ident::try_parse("b").unwrap().into(),
+                ty: TypeSpecifier(TemplatedIdent {
+                    ident: Ident::try_parse("f32").unwrap().into(),
+                    args: empty_args.clone(),
+                }),
+            }
+            .into(),
+        ]);
+
+        let a = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("a").unwrap().into(),
+                    args: empty_args.clone(),
+                },
+            }
+            .into(),
+        );
+        let b = expected_module.expressions.append(
+            Expression::Identifier {
+                ident: TemplatedIdent {
+                    ident: Ident::try_parse("b").unwrap().into(),
+                    args: empty_args.clone(),
+                },
+            }
+            .into(),
+        );
+        let sub = expected_module.expressions.append(
+            Expression::Binary {
+                lhs: a,
+                op: BinaryOperator::Subtract.into(),
+                rhs: b,
+            }
+            .into(),
+        );
+        let body = expected_module
+            .statements
+            .append_all(vec![Statement::Return(Some(sub)).into()]);
+
+        expected_module.declarations.append(
+            GlobalDeclaration::Function(FunctionDeclaration {
+                attributes: empty_attributes.clone(),
+                header: FunctionHeader {
+                    ident: Ident::try_parse("foo").unwrap().into(),
+                    parameters,
+                    result: Some(
+                        FunctionResult {
+                            attributes: empty_attributes.clone(),
+                            ty: TemplatedIdent {
+                                ident: Ident::try_parse("i32").unwrap().into(),
+                                args: empty_args.clone(),
+                            },
+                        }
+                        .into(),
+                    ),
+                }
+                .into(),
+                body,
+            })
+            .into(),
+        );
+
+        assert_parse_valid_succeeds(src, expected_module)
     }
 }
