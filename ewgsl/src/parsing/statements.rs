@@ -56,6 +56,7 @@ impl<'a, S: spans::SpanState> EqIn<'a> for IfClause<'a, S> {
         return true;
     }
 }
+
 #[derive(Debug)]
 pub struct SwitchClause<'a, S: spans::SpanState = spans::SpansPresent> {
     pub default_keyword: Option<spans::Span>,
@@ -110,6 +111,59 @@ impl<'a, S: spans::SpanState> EqIn<'a> for SwitchClause<'a, S> {
 }
 
 #[derive(Debug)]
+pub struct ContinuingStatement<'a, S: spans::SpanState = spans::SpansPresent> {
+    pub continuing_keyword_span: spans::Span,
+    pub body: Range<Handle<Statement<'a, S>>>,
+    pub break_if: Option<Handle<Expression<'a, S>>>,
+}
+
+impl<'a> Spanned for ContinuingStatement<'a> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = ContinuingStatement<'a, spans::SpansErased>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
+        ContinuingStatement {
+            continuing_keyword_span: spans::Span::empty(),
+            body: self.body.erase_spans(),
+            break_if: self.break_if.erase_spans(),
+        }
+    }
+}
+
+#[cfg(feature = "eq")]
+impl<'a, S: spans::SpanState> EqIn<'a> for ContinuingStatement<'a, S> {
+    type Context<'b> = <Statement<'a, S> as EqIn<'a>>::Context<'b>
+    where
+        'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        if self.continuing_keyword_span != other.continuing_keyword_span {
+            return false;
+        }
+
+        if !self.body.eq_in(own_context, &other.body, other_context) {
+            return false;
+        }
+
+        if !self.break_if.eq_in(
+            &own_context.expressions,
+            &other.break_if,
+            &other_context.expressions,
+        ) {
+            return false;
+        }
+
+        return true;
+    }
+}
+
+#[derive(Debug)]
 pub enum Statement<'a, S: spans::SpanState = spans::SpansPresent> {
     Return(Option<Handle<Expression<'a, S>>>),
     If {
@@ -122,6 +176,11 @@ pub enum Statement<'a, S: spans::SpanState = spans::SpansPresent> {
         attributes: Range<Handle<Attribute<'a, S>>>,
         expression: Handle<Expression<'a, S>>,
         clauses: Range<Handle<SwitchClause<'a, S>>>,
+    },
+    Loop {
+        attributes: Range<Handle<Attribute<'a, S>>>,
+        body: Range<Handle<Statement<'a, S>>>,
+        continuing: Option<spans::WithSpan<ContinuingStatement<'a, S>, S>>,
     },
 }
 
@@ -153,6 +212,17 @@ impl<'a> Spanned for Statement<'a> {
                 expression: expression.erase_spans(),
                 clauses: clauses.erase_spans(),
             },
+            Statement::Loop {
+                attributes,
+                body,
+                continuing,
+            } => Statement::Loop {
+                attributes: attributes.erase_spans(),
+                body: body.erase_spans(),
+                continuing: continuing
+                    .erase_spans()
+                    .map(|inner| inner.erase_inner_spans()),
+            },
         }
     }
 }
@@ -175,7 +245,7 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Statement<'a, S> {
 
         match (self, other) {
             (Statement::Return(lhs), Statement::Return(rhs)) => {
-                lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions)
+                return lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions);
             }
             (
                 Statement::If {
@@ -258,6 +328,39 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Statement<'a, S> {
                     if !lhs.eq_in(own_context, rhs, other_context) {
                         return false;
                     }
+                }
+
+                return true;
+            }
+            (
+                Statement::Loop {
+                    attributes: lhs_attributes,
+                    body: lhs_body,
+                    continuing: lhs_continuing,
+                },
+                Statement::Loop {
+                    attributes: rhs_attributes,
+                    body: rhs_body,
+                    continuing: rhs_continuing,
+                },
+            ) => {
+                if !Attribute::are_sets_eq_in(
+                    lhs_attributes.clone(),
+                    &own_context.attributes,
+                    &own_context.expressions,
+                    rhs_attributes.clone(),
+                    &other_context.attributes,
+                    &other_context.expressions,
+                ) {
+                    return false;
+                }
+
+                if !lhs_body.eq_in(own_context, rhs_body, other_context) {
+                    return false;
+                }
+
+                if !lhs_continuing.eq_in(own_context, rhs_continuing, other_context) {
+                    return false;
                 }
 
                 return true;

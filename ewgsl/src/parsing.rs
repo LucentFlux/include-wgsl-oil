@@ -46,7 +46,7 @@ use self::{
     expression::Expression,
     functions::{FunctionResult, Parameter},
     ident::{Ident, TemplatedIdent},
-    statements::{IfClause, Statement, SwitchClause},
+    statements::{ContinuingStatement, IfClause, Statement, SwitchClause},
     structs::{StructDeclaration, StructMember},
     variables::{GlobalConstantDeclaration, GlobalOverrideDeclaration},
 };
@@ -164,7 +164,6 @@ impl Display for parser::Rule {
             parser::Rule::BREAK_STATEMENT => "break statement",
             parser::Rule::CONTINUE_STATEMENT => "continue statement",
             parser::Rule::BREAK_IF_STATEMENT => "break if statement",
-            parser::Rule::CONTINUING_COMPOUND_STATEMENT => "continuing compound statement",
             parser::Rule::CONTINUING_STATEMENT => "continuing statement",
             parser::Rule::RETURN_STATEMENT => "return statement",
             parser::Rule::CONST_ASSERT_STATEMENT => "const assert statement",
@@ -2172,7 +2171,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let else_clause = match else_clause {
             None => None,
-            Some(else_clause) => Some(else_clause?),
+            Some(else_clause) => else_clause.ok(),
         };
 
         return Ok(Statement::If {
@@ -2287,6 +2286,60 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         return Ok(statement);
     }
 
+    fn parse_continuing_statement(
+        module: &mut ParsedModule<'a>,
+        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        statement: Pair<'a, parser::Rule>,
+    ) -> Result<WithSpan<ContinuingStatement<'a>>, ()> {
+        debug_assert_eq!(statement.as_rule(), parser::Rule::CONTINUING_STATEMENT);
+        let continuing_span = statement.as_span().into();
+
+        let mut inner = statement.into_inner();
+
+        let keyword = inner.next().unwrap();
+        let continuing_keyword_span = keyword.as_span().into();
+        debug_assert_eq!(keyword.as_rule(), parser::Rule::CONTINUING_KEYWORD);
+
+        let mut body = vec![];
+        while let Some(parser::Rule::STATEMENT) = inner.peek().map(|pair| pair.as_rule()) {
+            let statement = inner.next().unwrap();
+            let statement = Self::parse_statement(module, issues, statement);
+            if let Ok(Some(statement)) = statement {
+                body.push(statement);
+            }
+        }
+        let body = module.statements.append_all(body);
+
+        let break_if = inner.next();
+        let break_if = match break_if {
+            None => None,
+            Some(break_if) => {
+                debug_assert_eq!(break_if.as_rule(), parser::Rule::BREAK_IF_STATEMENT);
+
+                let mut break_if_inner = break_if.into_inner();
+
+                let keyword = break_if_inner.next().unwrap();
+                debug_assert_eq!(keyword.as_rule(), parser::Rule::BREAK_KEYWORD);
+
+                let keyword = break_if_inner.next().unwrap();
+                debug_assert_eq!(keyword.as_rule(), parser::Rule::IF_KEYWORD);
+
+                let expr = break_if_inner.next().unwrap();
+                let expr = Self::parse_expression(module, issues, expr);
+
+                let expr = expr.ok();
+                expr.map(|expr| module.expressions.append(expr))
+            }
+        };
+
+        let continuing = ContinuingStatement {
+            continuing_keyword_span,
+            body,
+            break_if,
+        };
+        return Ok(WithSpan::new(continuing, continuing_span));
+    }
+
     fn parse_loop_statement(
         module: &mut ParsedModule<'a>,
         issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
@@ -2294,7 +2347,35 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::LOOP_STATEMENT);
 
-        unimplemented!()
+        let mut inner = statement.into_inner();
+
+        let attributes = inner.next().unwrap();
+        let attributes = Self::parse_attribute_set(module, issues, attributes);
+
+        let keyword = inner.next().unwrap();
+        debug_assert_eq!(keyword.as_rule(), parser::Rule::LOOP_KEYWORD);
+
+        let mut body = vec![];
+        while let Some(parser::Rule::STATEMENT) = inner.peek().map(|pair| pair.as_rule()) {
+            let statement = inner.next().unwrap();
+            let statement = Self::parse_statement(module, issues, statement);
+            if let Ok(Some(statement)) = statement {
+                body.push(statement);
+            }
+        }
+        let body = module.statements.append_all(body);
+
+        let continuing = inner.next();
+        let continuing = match continuing {
+            None => None,
+            Some(continuing) => Self::parse_continuing_statement(module, issues, continuing).ok(),
+        };
+
+        return Ok(Statement::Loop {
+            attributes,
+            body,
+            continuing,
+        });
     }
 
     fn parse_for_statement(
