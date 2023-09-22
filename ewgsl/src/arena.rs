@@ -9,8 +9,6 @@ use std::{
     ops::{self, Range},
 };
 
-use crate::spans::{self, Spanned};
-
 /// An unique index in the arena array that a handle points to.
 /// The "non-zero" part ensures that an `Option<Handle<T>>` has
 /// the same size and representation as `Handle<T>`.
@@ -48,14 +46,13 @@ impl<T> Handle<T> {
     const unsafe fn from_usize_unchecked(index: usize) -> Self {
         Handle::new(Index::new_unchecked(index + 1))
     }
-}
 
-impl<T: Spanned> Spanned for Handle<T> {
-    #[cfg(feature = "span_erasure")]
-    type Spanless = Handle<T::Spanless>;
-
-    #[cfg(feature = "span_erasure")]
-    fn erase_spans(self) -> Self::Spanless {
+    /// Converts this from a handle to an arena holding variables of type `T` to a handle to an arena holding variables of type `U`.
+    ///
+    /// # Safety
+    ///
+    /// To be safe, this method should only be used when also retyping (mapping) the arena to which this handle refers.
+    pub(crate) fn retype<U>(self) -> Handle<U> {
         Handle {
             index: self.index,
             marker: PhantomData,
@@ -125,9 +122,6 @@ impl BadHandle {
     }
 }
 
-/// A strongly typed range of handles.
-pub type HandleRange<T> = ops::Range<Handle<T>>;
-
 // NOTE: Keep this diagnostic in sync with that of [`BadHandle`].
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("Handle range {range:?} of {kind} is either not present yet, or inaccessible")]
@@ -135,11 +129,11 @@ pub struct BadHandleRange {
     // This error is used for many `Handle` types, but there's no point in making this generic, so
     // we just flatten them all to `Handle<()>` here.
     kind: &'static str,
-    range: HandleRange<()>,
+    range: Range<Handle<()>>,
 }
 
 impl BadHandleRange {
-    pub fn new<T>(range: HandleRange<T>) -> Self {
+    pub fn new<T>(range: Range<Handle<T>>) -> Self {
         Self {
             kind: std::any::type_name::<T>(),
             range: (Handle::new(range.start.index)..Handle::new(range.end.index)),
@@ -153,12 +147,12 @@ impl BadHandleRange {
 /// Adding new items to the arena produces a strongly-typed [`Handle`].
 /// The arena can be indexed using the given handle to obtain
 /// a reference to the stored item.
-pub struct Arena<T, S: spans::SpanState = spans::SpansPresent> {
+pub struct Arena<T> {
     /// Values of this arena.
-    data: Vec<spans::WithSpan<T, S>>,
+    data: Vec<T>,
 }
 
-impl<T, S: spans::SpanState> Arena<T, S> {
+impl<T> Arena<T> {
     /// Create a new arena with no initial capacity allocated.
     pub const fn new() -> Self {
         Arena { data: Vec::new() }
@@ -176,7 +170,7 @@ impl<T, S: spans::SpanState> Arena<T, S> {
 
     /// Returns an iterator over the items stored in this arena, returning both
     /// the item's handle and a reference to it.
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (Handle<T>, &spans::WithSpan<T, S>)> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (Handle<T>, &T)> {
         self.data
             .iter()
             .enumerate()
@@ -185,9 +179,7 @@ impl<T, S: spans::SpanState> Arena<T, S> {
 
     /// Returns a iterator over the items stored in this arena,
     /// returning both the item's handle and a mutable reference to it.
-    pub fn iter_mut(
-        &mut self,
-    ) -> impl DoubleEndedIterator<Item = (Handle<T>, &mut spans::WithSpan<T, S>)> {
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = (Handle<T>, &mut T)> {
         self.data
             .iter_mut()
             .enumerate()
@@ -195,21 +187,18 @@ impl<T, S: spans::SpanState> Arena<T, S> {
     }
 
     /// Adds a new value to the arena, returning a typed handle.
-    pub fn append(&mut self, value: spans::WithSpan<T, S>) -> Handle<T> {
+    pub fn append(&mut self, value: T) -> Handle<T> {
         let index = self.data.len();
         self.data.push(value);
         Handle::from_usize(index)
     }
 
     /// Appends all objects to get a handle range to the inserted items.
-    pub fn append_all(
-        &mut self,
-        members: impl IntoIterator<Item = spans::WithSpan<T, S>>,
-    ) -> Range<Handle<T>> {
+    pub fn append_all(&mut self, members: impl IntoIterator<Item = T>) -> Range<Handle<T>> {
         // Monomorphise
-        fn inner<T, S: spans::SpanState>(
-            arena: &mut Arena<T, S>,
-            mut members: impl Iterator<Item = spans::WithSpan<T, S>>,
+        fn inner<T>(
+            arena: &mut Arena<T>,
+            mut members: impl Iterator<Item = T>,
         ) -> Range<Handle<T>> {
             let start_index = arena.data.len();
             arena.data.extend(&mut members);
@@ -221,7 +210,7 @@ impl<T, S: spans::SpanState> Arena<T, S> {
     }
 
     /// Uses a handle to look up a value. Use `arena[handle]` for a version that panics on error instead.
-    pub fn try_get(&self, handle: Handle<T>) -> Result<&spans::WithSpan<T, S>, BadHandle> {
+    pub fn try_get(&self, handle: Handle<T>) -> Result<&T, BadHandle> {
         self.data
             .get(handle.index())
             .ok_or_else(|| BadHandle::new(handle))
@@ -230,7 +219,7 @@ impl<T, S: spans::SpanState> Arena<T, S> {
     pub fn try_get_all(
         &self,
         range: Range<Handle<T>>,
-    ) -> Result<impl Iterator<Item = &spans::WithSpan<T, S>>, BadHandleRange> {
+    ) -> Result<impl Iterator<Item = &T>, BadHandleRange> {
         let start = range.start.index.get();
         let end = range.end.index.get();
 
@@ -247,10 +236,7 @@ impl<T, S: spans::SpanState> Arena<T, S> {
     }
 
     /// Get a mutable reference to an element in the arena.
-    pub fn try_get_mut(
-        &mut self,
-        handle: Handle<T>,
-    ) -> Result<&mut spans::WithSpan<T, S>, BadHandle> {
+    pub fn try_get_mut(&mut self, handle: Handle<T>) -> Result<&mut T, BadHandle> {
         self.data
             .get_mut(handle.index())
             .ok_or_else(|| BadHandle::new(handle))
@@ -299,67 +285,59 @@ impl<T, S: spans::SpanState> Arena<T, S> {
         return handle.index() < self.data.len();
     }
 
-    /// Maps this arena to a new one, where each handle for this one is still valid for the new one, and where the spans are unchanged.
-    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Arena<U, S> {
+    /// Maps this arena to a new one, where each handle for this one is still valid for the new one, as long as the handles are `retype`d.
+    ///
+    /// # Safety
+    ///
+    /// The handles to this arena must also be `retype`d to `U`.
+    pub(crate) fn map<U>(self, mut f: impl FnMut(T) -> U) -> Arena<U> {
         Arena {
-            data: self.data.into_iter().map(move |v| v.map(&mut f)).collect(),
+            data: self.data.into_iter().map(&mut f).collect(),
         }
     }
 }
 
-impl<T> Spanned for Arena<T, spans::SpansPresent> {
-    #[cfg(feature = "span_erasure")]
-    type Spanless = Arena<T, spans::SpansErased>;
-
-    #[cfg(feature = "span_erasure")]
-    fn erase_spans(self) -> Self::Spanless {
-        Arena {
-            data: self.data.into_iter().map(|vs| vs.erase_spans()).collect(),
-        }
-    }
-}
-
-impl<T, S: spans::SpanState> Default for Arena<T, S> {
+impl<T> Default for Arena<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T, S: spans::SpanState> From<Vec<spans::WithSpan<T, S>>> for Arena<T, S> {
-    fn from(data: Vec<spans::WithSpan<T, S>>) -> Self {
+impl<T> From<Vec<T>> for Arena<T> {
+    fn from(data: Vec<T>) -> Self {
         Self { data }
     }
 }
 
-impl<T: fmt::Debug, S: spans::SpanState> fmt::Debug for Arena<T, S> {
+impl<T: fmt::Debug> fmt::Debug for Arena<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<T, S: spans::SpanState> ops::Index<Handle<T>> for Arena<T, S> {
-    type Output = spans::WithSpan<T, S>;
+impl<T> ops::Index<Handle<T>> for Arena<T> {
+    type Output = T;
 
-    fn index(&self, handle: Handle<T>) -> &spans::WithSpan<T, S> {
+    fn index(&self, handle: Handle<T>) -> &T {
         &self.data[handle.index()]
     }
 }
 
-impl<T, S: spans::SpanState> ops::IndexMut<Handle<T>> for Arena<T, S> {
-    fn index_mut(&mut self, handle: Handle<T>) -> &mut spans::WithSpan<T, S> {
+impl<T> ops::IndexMut<Handle<T>> for Arena<T> {
+    fn index_mut(&mut self, handle: Handle<T>) -> &mut T {
         &mut self.data[handle.index()]
     }
 }
 
-impl<T, S: spans::SpanState> ops::Index<HandleRange<T>> for Arena<T, S> {
-    type Output = [spans::WithSpan<T, S>];
+impl<T> ops::Index<Range<Handle<T>>> for Arena<T> {
+    type Output = [T];
 
-    fn index(&self, range: HandleRange<T>) -> &[spans::WithSpan<T, S>] {
+    fn index(&self, range: Range<Handle<T>>) -> &[T] {
         &self.data[range.start.index()..range.end.index()]
     }
 }
 
-impl<T: Hash + Eq, S: spans::SpanState> PartialEq for Arena<T, S> {
+impl<T: Hash + Eq> PartialEq for Arena<T> {
     fn eq(&self, other: &Self) -> bool {
         fn vecs_contain_same<T: Hash + Eq>(v1: &Vec<T>, v2: &Vec<T>) -> bool {
             v1.iter().collect::<HashSet<_>>() == v2.iter().collect::<HashSet<_>>()
@@ -368,26 +346,11 @@ impl<T: Hash + Eq, S: spans::SpanState> PartialEq for Arena<T, S> {
     }
 }
 
-impl<T: Hash + Eq, S: spans::SpanState> Eq for Arena<T, S> {}
+impl<T: Hash + Eq> Eq for Arena<T> {}
 
-/// Akin to the [`vec`] macro, for creating an arena inline, with or without spans.
+/// Akin to the [`vec`] macro, for creating an arena inline.
 ///
 /// # Usage
-///
-/// With spans:
-/// ```ignore
-/// # let span1 = ewgsl::spans::Span::empty();
-/// # let span2 = ewgsl::spans::Span::empty();
-/// # let v1 = 12;
-/// # let v2 = 24;
-/// let arena = ewgsl::arena![
-///     span1 => v1,
-///     span2 => v2,
-///     /* ... */
-/// ];
-/// ```
-///
-/// Without spans:
 /// ```ignore
 /// # let v1 = 7usize;
 /// # let v2 = 0usize;
@@ -400,22 +363,11 @@ impl<T: Hash + Eq, S: spans::SpanState> Eq for Arena<T, S> {}
 #[allow(unused_macros)]
 macro_rules! arena {
     (
-        $($span:expr => $item:expr),* $(,)?
-    ) => {
-        $crate::arena::Arena::<_, $crate::spans::SpansPresent>::from(vec![
-            $(
-                $crate::spans::WithSpan::new($item, $span)
-            ),*
-        ])
-    };
-
-    (
         $($item:expr),* $(,)?
     ) => {{
-        use $crate::spans::Spanned;
-        $crate::arena::Arena::<_, $crate::spans::SpansErased>::from(vec![
+        $crate::arena::Arena::<_>::from(vec![
             $(
-                $crate::spans::WithSpan::new($item, $crate::spans::Span::empty()).erase_spans()
+                $item
             ),*
         ])
     }};
@@ -429,7 +381,7 @@ mod tests {
 
     #[test]
     fn append_non_unique() {
-        let mut arena: Arena<u8, spans::SpansErased> = Arena::new();
+        let mut arena: Arena<u8> = Arena::new();
         let t1 = arena.append(0.into());
         let t2 = arena.append(0.into());
         assert!(t1.index != t2.index);
@@ -438,7 +390,7 @@ mod tests {
 
     #[test]
     fn append_unique() {
-        let mut arena: Arena<u8, spans::SpansErased> = Arena::new();
+        let mut arena: Arena<u8> = Arena::new();
         let t1 = arena.append(0.into());
         let t2 = arena.append(1.into());
         assert!(t1.index != t2.index);
@@ -447,14 +399,14 @@ mod tests {
 
     #[test]
     fn append_none_gives_empty_range() {
-        let mut arena: Arena<u8, spans::SpansErased> = Arena::new();
+        let mut arena: Arena<u8> = Arena::new();
         let res = arena.append_all(vec![]);
         assert!(res.start.index >= res.end.index)
     }
 
     #[test]
     fn append_none_gives_single_element_range() {
-        let mut arena: Arena<u8, spans::SpansErased> = Arena::new();
+        let mut arena: Arena<u8> = Arena::new();
         let res = arena.append_all(vec![10u8.into()]);
         assert!(res.start.index.saturating_add(1) == res.end.index);
         assert!(arena[res.clone()].len() == 1);

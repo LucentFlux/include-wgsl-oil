@@ -1,6 +1,8 @@
 use perfect_derive::perfect_derive;
 use std::{fmt::Debug, hash::Hash, marker::PhantomData, ops::Range};
 
+use crate::arena::{Arena, Handle};
+
 /// A start (inclusive) and end (exclusive) within a given string marking the location of some text of interest.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span {
@@ -9,6 +11,7 @@ pub struct Span {
 }
 
 impl Span {
+    // An empty span, pointing to nothing.
     pub fn empty() -> Self {
         Self { start: 0, end: 0 }
     }
@@ -83,7 +86,7 @@ mod sealed {
 
 /// Represents that either the object has span information (using the [`SpansPresent`] marker type), or that the span information has been erased
 /// (using the [`SpansErased`] marker type).
-pub trait SpanState: sealed::SpanStateSealed + 'static {
+pub trait SpanState: 'static + Sized + sealed::SpanStateSealed {
     const SPANS_PRESENT: bool;
 }
 impl SpanState for SpansPresent {
@@ -94,15 +97,15 @@ impl SpanState for SpansErased {
     const SPANS_PRESENT: bool = false;
 }
 
-/// An object paired with a span.
+/// An object paired with a span, where the object has itself span information.
 #[perfect_derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct WithSpan<T, S: SpanState = SpansPresent> {
+pub struct SpannedParent<T, S: SpanState = SpansPresent> {
     inner: T,
     span: Span,
     _state: PhantomData<S>,
 }
 
-impl<T, S: SpanState> WithSpan<T, S> {
+impl<T, S: SpanState> SpannedParent<T, S> {
     pub fn unwrap(self) -> T {
         self.inner
     }
@@ -115,8 +118,8 @@ impl<T, S: SpanState> WithSpan<T, S> {
         &mut self.inner
     }
 
-    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> WithSpan<U, S> {
-        WithSpan {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SpannedParent<U, S> {
+        SpannedParent {
             inner: f(self.inner),
             span: self.span,
             _state: self._state,
@@ -124,7 +127,7 @@ impl<T, S: SpanState> WithSpan<T, S> {
     }
 }
 
-impl<T> WithSpan<T> {
+impl<T> SpannedParent<T> {
     pub fn new(inner: T, span: Span) -> Self {
         Self {
             inner,
@@ -138,32 +141,8 @@ impl<T> WithSpan<T> {
     }
 }
 
-impl<T, S: SpanState> WithSpan<T, S> {
-    #[cfg(feature = "span_erasure")]
-    pub(crate) fn erase_inner_spans(self) -> WithSpan<T::Spanless, S>
-    where
-        T: Spanned,
-    {
-        self.map(T::erase_spans)
-    }
-}
-
-impl<T> Spanned for WithSpan<T> {
-    #[cfg(feature = "span_erasure")]
-    type Spanless = WithSpan<T, SpansErased>;
-
-    #[cfg(feature = "span_erasure")]
-    fn erase_spans(self) -> Self::Spanless {
-        WithSpan {
-            inner: self.inner,
-            span: Span::empty(),
-            _state: PhantomData,
-        }
-    }
-}
-
 #[cfg(feature = "eq")]
-impl<'a, T: crate::EqIn<'a>, S: SpanState> crate::EqIn<'a> for WithSpan<T, S> {
+impl<'a, T: crate::EqIn<'a>, S: SpanState> crate::EqIn<'a> for SpannedParent<T, S> {
     type Context<'b> = T::Context<'b> where 'a: 'b;
 
     fn eq_in<'b>(
@@ -176,8 +155,10 @@ impl<'a, T: crate::EqIn<'a>, S: SpanState> crate::EqIn<'a> for WithSpan<T, S> {
     }
 }
 
+/// Allow tests to construct span-erased modules using `.into()`.
 #[cfg(feature = "span_erasure")]
-impl<T> From<T> for WithSpan<T, SpansErased> {
+#[cfg(test)]
+impl<T> From<T> for SpannedParent<T, SpansErased> {
     fn from(value: T) -> Self {
         Self {
             inner: value,
@@ -187,10 +168,94 @@ impl<T> From<T> for WithSpan<T, SpansErased> {
     }
 }
 
-impl<T: Debug, S: SpanState> Debug for WithSpan<T, S> {
+impl<T: Debug, S: SpanState> Debug for SpannedParent<T, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if S::SPANS_PRESENT {
-            f.debug_struct("WithSpan")
+            f.debug_struct("SpannedParent")
+                .field("inner", &self.inner)
+                .field("span", &self.span)
+                .finish()
+        } else {
+            self.inner.fmt(f)
+        }
+    }
+}
+
+/// An object paired with a span, where the object contained does not have span information.
+#[perfect_derive(Copy, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SpannedLeaf<T, S: SpanState = SpansPresent> {
+    inner: T,
+    span: Span,
+    _state: PhantomData<S>,
+}
+
+impl<T, S: SpanState> SpannedLeaf<T, S> {
+    pub fn unwrap(self) -> T {
+        self.inner
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SpannedLeaf<U, S> {
+        SpannedLeaf {
+            inner: f(self.inner),
+            span: self.span,
+            _state: self._state,
+        }
+    }
+}
+
+impl<T> SpannedLeaf<T> {
+    pub fn new(inner: T, span: Span) -> Self {
+        Self {
+            inner,
+            span,
+            _state: PhantomData,
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        self.span
+    }
+}
+
+#[cfg(feature = "eq")]
+impl<'a, T: crate::EqIn<'a>, S: SpanState> crate::EqIn<'a> for SpannedLeaf<T, S> {
+    type Context<'b> = T::Context<'b> where 'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        self.span == other.span && self.inner.eq_in(own_context, &other.inner, other_context)
+    }
+}
+
+/// Allow tests to construct span-erased modules using `.into()`.
+#[cfg(feature = "span_erasure")]
+#[cfg(test)]
+impl<T> From<T> for SpannedLeaf<T, SpansErased> {
+    fn from(value: T) -> Self {
+        Self {
+            inner: value,
+            span: Span::empty(),
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<T: Debug, S: SpanState> Debug for SpannedLeaf<T, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if S::SPANS_PRESENT {
+            f.debug_struct("SpannedLeaf")
                 .field("inner", &self.inner)
                 .field("span", &self.span)
                 .finish()
@@ -207,6 +272,40 @@ pub(crate) trait Spanned {
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless;
+
+    /*type Span;
+    type Inner;
+
+    fn span(&self) -> Span;
+    fn inner(&self) -> Span;*/
+}
+
+impl<T: Spanned> Spanned for SpannedParent<T> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = SpannedParent<T::Spanless, SpansErased>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
+        SpannedParent {
+            inner: self.inner.erase_spans(),
+            span: Span::empty(),
+            _state: PhantomData,
+        }
+    }
+}
+
+impl<T> Spanned for SpannedLeaf<T> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = SpannedLeaf<T, SpansErased>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
+        SpannedLeaf {
+            inner: self.inner,
+            span: Span::empty(),
+            _state: PhantomData,
+        }
+    }
 }
 
 impl<T: Spanned> Spanned for Option<T> {
@@ -236,5 +335,25 @@ impl<T: Spanned> Spanned for Range<T> {
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         self.start.erase_spans()..self.end.erase_spans()
+    }
+}
+
+impl<T: Spanned> Spanned for Handle<T> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = Handle<T::Spanless>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
+        self.retype()
+    }
+}
+
+impl<T: Spanned> Spanned for Arena<T> {
+    #[cfg(feature = "span_erasure")]
+    type Spanless = Arena<T::Spanless>;
+
+    #[cfg(feature = "span_erasure")]
+    fn erase_spans(self) -> Self::Spanless {
+        self.map(|vs| vs.erase_spans())
     }
 }

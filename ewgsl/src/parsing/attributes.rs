@@ -2,15 +2,23 @@ use std::{ops::Range, str::FromStr};
 use strum::VariantNames;
 
 use crate::{
-    arena::Handle,
+    arena::{Arena, Handle},
     join_into_readable_list,
-    spans::{self, Spanned, WithSpan},
+    parsing::expression::ExpressionHandle,
 };
 
-use super::{expression::Expression, ParsedModule};
+use super::{
+    text_spans::{self, Spanned, SpannedLeaf, SpannedParent},
+    ParsedModule,
+};
 
 #[cfg(feature = "eq")]
 use crate::EqIn;
+
+pub type AttributeArena<'a, S = text_spans::SpansPresent> =
+    Arena<SpannedParent<Attribute<'a, S>, S>>;
+pub type AttributeHandle<'a, S = text_spans::SpansPresent> =
+    Handle<SpannedParent<Attribute<'a, S>, S>>;
 
 #[derive(Debug, Clone, strum::EnumDiscriminants)]
 #[strum_discriminants(derive(
@@ -22,42 +30,42 @@ use crate::EqIn;
     strum::IntoStaticStr,
 ))]
 #[strum_discriminants(name(AttributeIdentifier))]
-pub enum AttributeInner<'a, S: spans::SpanState = spans::SpansPresent> {
+pub enum AttributeInner<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
     #[strum_discriminants(strum(serialize = "align"))]
-    Align(Handle<Expression<'a, S>>),
+    Align(ExpressionHandle<'a, S>),
     #[strum_discriminants(strum(serialize = "binding"))]
-    Binding(Handle<Expression<'a, S>>),
+    Binding(ExpressionHandle<'a, S>),
     #[strum_discriminants(strum(serialize = "builtin"))]
-    Builtin(Handle<Expression<'a, S>>),
+    Builtin(ExpressionHandle<'a, S>),
     #[strum_discriminants(strum(serialize = "const"))]
     Const,
     #[strum_discriminants(strum(serialize = "diagnostic"))]
     Diagnostic {
-        severity: Handle<Expression<'a, S>>,
-        trigger: Handle<Expression<'a, S>>,
+        severity: ExpressionHandle<'a, S>,
+        trigger: ExpressionHandle<'a, S>,
     },
     #[strum_discriminants(strum(serialize = "group"))]
-    Group(Handle<Expression<'a, S>>),
+    Group(ExpressionHandle<'a, S>),
     #[strum_discriminants(strum(serialize = "id"))]
-    Id(Handle<Expression<'a, S>>),
+    Id(ExpressionHandle<'a, S>),
     #[strum_discriminants(strum(serialize = "interpolate"))]
     Interpolate {
-        inv_type: Handle<Expression<'a, S>>,
-        inv_sampling: Option<Handle<Expression<'a, S>>>,
+        inv_type: ExpressionHandle<'a, S>,
+        inv_sampling: Option<ExpressionHandle<'a, S>>,
     },
     #[strum_discriminants(strum(serialize = "invariant"))]
     Invariant,
     #[strum_discriminants(strum(serialize = "location"))]
-    Location(Handle<Expression<'a, S>>),
+    Location(ExpressionHandle<'a, S>),
     #[strum_discriminants(strum(serialize = "must_use"))]
     MustUse,
     #[strum_discriminants(strum(serialize = "size"))]
-    Size(Handle<Expression<'a, S>>),
+    Size(ExpressionHandle<'a, S>),
     #[strum_discriminants(strum(serialize = "workgroup_size"))]
     WorkgroupSize {
-        x: Handle<Expression<'a, S>>,
-        y: Option<Handle<Expression<'a, S>>>,
-        z: Option<Handle<Expression<'a, S>>>,
+        x: ExpressionHandle<'a, S>,
+        y: Option<ExpressionHandle<'a, S>>,
+        z: Option<ExpressionHandle<'a, S>>,
     },
     #[strum_discriminants(strum(serialize = "vertex"))]
     Vertex,
@@ -115,7 +123,7 @@ impl AttributeIdentifier {
 
 impl<'a> Spanned for AttributeInner<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = AttributeInner<'a, spans::SpansErased>;
+    type Spanless = AttributeInner<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -154,9 +162,9 @@ impl<'a> Spanned for AttributeInner<'a> {
 }
 
 #[derive(Debug)]
-pub struct Attribute<'a, S: spans::SpanState = spans::SpansPresent> {
+pub struct Attribute<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
     /// The span of the identifier portion of the input.
-    pub identifier_span: spans::Span,
+    pub identifier_span: text_spans::Span,
     /// The data represented by this attribute.
     pub inner: AttributeInner<'a, S>,
 }
@@ -164,16 +172,16 @@ pub struct Attribute<'a, S: spans::SpanState = spans::SpansPresent> {
 impl<'a> Attribute<'a> {
     pub fn try_parse_from(
         module: &ParsedModule<'a>,
-        identifier: WithSpan<AttributeIdentifier>,
-        expressions: impl IntoIterator<Item = Handle<Expression<'a>>> + ExactSizeIterator,
-    ) -> Result<Self, Vec<WithSpan<super::ParseIssue<'a>>>> {
+        identifier: SpannedLeaf<AttributeIdentifier>,
+        expressions: impl IntoIterator<Item = ExpressionHandle<'a>> + ExactSizeIterator,
+    ) -> Result<Self, Vec<SpannedLeaf<super::ParseIssue<'a>>>> {
         let identifier_span = identifier.span();
         let identifier = identifier.unwrap();
 
         // Returns None if insufficient parameter expressions were given
-        fn collect_expressions<'a, S: spans::SpanState>(
+        fn collect_expressions<'a, S: text_spans::SpanState>(
             identifier: AttributeIdentifier,
-            expressions: &mut impl Iterator<Item = Handle<Expression<'a, S>>>,
+            expressions: &mut impl Iterator<Item = ExpressionHandle<'a, S>>,
         ) -> Option<AttributeInner<'a, S>> {
             let inner = match identifier {
                 AttributeIdentifier::Align => AttributeInner::Align(expressions.next()?),
@@ -212,7 +220,7 @@ impl<'a> Attribute<'a> {
         // Use as many expressions as is required for this argument
         let mut expressions = expressions.into_iter();
         let inner = collect_expressions(identifier, &mut expressions).ok_or_else(|| {
-            vec![WithSpan::new(
+            vec![SpannedLeaf::new(
                 super::ParseIssue::InadequateAttributeArgumentCount {
                     attribute_ident: identifier,
                     minimum: required_arg_count.start,
@@ -235,7 +243,7 @@ impl<'a> Attribute<'a> {
                     .try_get(expr)
                     .expect("handle for active module exists")
                     .span();
-                WithSpan::new(inner, span)
+                SpannedLeaf::new(inner, span)
             })
             .collect::<Vec<_>>();
         if !excess.is_empty() {
@@ -250,15 +258,15 @@ impl<'a> Attribute<'a> {
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> Attribute<'a, S> {
+impl<'a, S: text_spans::SpanState> Attribute<'a, S> {
     /// Checks that two sets of attributes are equivalent. Currently O(n^2) but fast because we assume things will have small amounts of attributes.
     pub fn are_sets_eq_in(
-        lhs: Range<Handle<Self>>,
-        lhs_context_1: &crate::arena::Arena<Self, S>,
-        lhs_context_2: &crate::arena::Arena<Expression<'a, S>, S>,
-        rhs: Range<Handle<Self>>,
-        rhs_context_1: &crate::arena::Arena<Self, S>,
-        rhs_context_2: &crate::arena::Arena<Expression<'a, S>, S>,
+        lhs: Range<AttributeHandle<'a, S>>,
+        lhs_context_1: &AttributeArena<'a, S>,
+        lhs_context_2: &super::expression::ExpressionArena<'a, S>,
+        rhs: Range<AttributeHandle<'a, S>>,
+        rhs_context_1: &AttributeArena<'a, S>,
+        rhs_context_2: &super::expression::ExpressionArena<'a, S>,
     ) -> bool {
         let lhs_attributes = &lhs_context_1[lhs];
         let mut lhs_attributes = lhs_attributes.into_iter().collect::<Vec<_>>();
@@ -282,20 +290,20 @@ impl<'a, S: spans::SpanState> Attribute<'a, S> {
 
 impl<'a> Spanned for Attribute<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = Attribute<'a, spans::SpansErased>;
+    type Spanless = Attribute<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         Attribute {
-            identifier_span: spans::Span::empty(),
+            identifier_span: text_spans::Span::empty(),
             inner: self.inner.erase_spans(),
         }
     }
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for Attribute<'a, S> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for Attribute<'a, S> {
+    type Context<'b> = super::expression::ExpressionArena<'a, S> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,

@@ -2,24 +2,24 @@ use std::ops::Range;
 
 use perfect_derive::perfect_derive;
 
-use crate::{
-    arena::Handle,
-    spans::{self, Spanned},
+use super::{
+    attributes::{Attribute, AttributeHandle},
+    expression::{Expression, ExpressionHandle},
+    ident,
+    text_spans::{self, Spanned, SpannedParent},
 };
-
-use super::{attributes::Attribute, expression::Expression, ident};
 
 #[cfg(feature = "eq")]
 use crate::EqIn;
 
 #[perfect_derive(Debug)]
-pub struct TypeSpecifier<'a, S: spans::SpanState = spans::SpansPresent>(
+pub struct TypeSpecifier<'a, S: text_spans::SpanState = text_spans::SpansPresent>(
     pub ident::TemplatedIdent<'a, S>,
 );
 
 impl<'a> Spanned for TypeSpecifier<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = TypeSpecifier<'a, spans::SpansErased>;
+    type Spanless = TypeSpecifier<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -28,8 +28,8 @@ impl<'a> Spanned for TypeSpecifier<'a> {
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for TypeSpecifier<'a, S> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for TypeSpecifier<'a, S> {
+    type Context<'b> = <Expression<'a, S> as EqIn<'a>>::Context<'b> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -42,14 +42,14 @@ impl<'a, S: spans::SpanState> EqIn<'a> for TypeSpecifier<'a, S> {
 }
 
 #[perfect_derive(Debug)]
-pub struct OptionallyTypedIdent<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub ident: spans::WithSpan<ident::Ident<'a>, S>,
+pub struct OptionallyTypedIdent<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub ident: ident::Ident<'a, S>,
     pub ty: Option<TypeSpecifier<'a, S>>,
 }
 
 impl<'a> Spanned for OptionallyTypedIdent<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = OptionallyTypedIdent<'a, spans::SpansErased>;
+    type Spanless = OptionallyTypedIdent<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -61,8 +61,8 @@ impl<'a> Spanned for OptionallyTypedIdent<'a> {
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for OptionallyTypedIdent<'a, S> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for OptionallyTypedIdent<'a, S> {
+    type Context<'b> = <Expression<'a, S> as EqIn<'a>>::Context<'b> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -83,14 +83,14 @@ impl<'a, S: spans::SpanState> EqIn<'a> for OptionallyTypedIdent<'a, S> {
 }
 
 #[perfect_derive(Debug)]
-pub struct VariableDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub template_list: Range<Handle<Expression<'a, S>>>,
+pub struct VariableDeclaration<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub template_list: Range<ExpressionHandle<'a, S>>,
     pub ident: OptionallyTypedIdent<'a, S>,
 }
 
 impl<'a> Spanned for VariableDeclaration<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = VariableDeclaration<'a, spans::SpansErased>;
+    type Spanless = VariableDeclaration<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -102,8 +102,8 @@ impl<'a> Spanned for VariableDeclaration<'a> {
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for VariableDeclaration<'a, S> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for VariableDeclaration<'a, S> {
+    type Context<'b> = <Expression<'a, S> as EqIn<'a>>::Context<'b> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -129,35 +129,35 @@ impl<'a, S: spans::SpanState> EqIn<'a> for VariableDeclaration<'a, S> {
 }
 
 #[perfect_derive(Debug)]
-pub struct GlobalVariableDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub attributes: Range<Handle<Attribute<'a, S>>>,
-    pub decl: spans::WithSpan<VariableDeclaration<'a, S>, S>,
-    pub init: Option<Handle<Expression<'a, S>>>,
+pub struct GlobalVariableDeclaration<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub attributes: Range<AttributeHandle<'a, S>>,
+    pub decl: SpannedParent<VariableDeclaration<'a, S>, S>,
+    pub init: Option<ExpressionHandle<'a, S>>,
 }
 
-impl<'a, S: spans::SpanState> GlobalVariableDeclaration<'a, S> {
+impl<'a, S: text_spans::SpanState> GlobalVariableDeclaration<'a, S> {
     pub fn name<'b>(&'b self) -> &'b str {
-        self.decl.inner().ident.ident.inner()
+        self.decl.inner().ident.ident.as_ref()
     }
 }
 
 impl<'a> Spanned for GlobalVariableDeclaration<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = GlobalVariableDeclaration<'a, spans::SpansErased>;
+    type Spanless = GlobalVariableDeclaration<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         GlobalVariableDeclaration {
             attributes: self.attributes.erase_spans(),
-            decl: self.decl.erase_spans().map(Spanned::erase_spans),
+            decl: self.decl.erase_spans(),
             init: self.init.erase_spans(),
         }
     }
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for GlobalVariableDeclaration<'a, S> {
-    type Context<'b> = (&'b crate::arena::Arena<Attribute<'a, S>, S>, &'b crate::arena::Arena<Expression<'a, S>, S>) where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for GlobalVariableDeclaration<'a, S> {
+    type Context<'b> = (&'b super::attributes::AttributeArena<'a, S>, &'b super::expression::ExpressionArena<'a, S>) where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -198,33 +198,33 @@ impl<'a, S: spans::SpanState> EqIn<'a> for GlobalVariableDeclaration<'a, S> {
 }
 
 #[perfect_derive(Debug)]
-pub struct GlobalConstantDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub decl: spans::WithSpan<OptionallyTypedIdent<'a, S>, S>,
-    pub init: Handle<Expression<'a, S>>,
+pub struct GlobalConstantDeclaration<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub decl: SpannedParent<OptionallyTypedIdent<'a, S>, S>,
+    pub init: ExpressionHandle<'a, S>,
 }
 
-impl<'a, S: spans::SpanState> GlobalConstantDeclaration<'a, S> {
+impl<'a, S: text_spans::SpanState> GlobalConstantDeclaration<'a, S> {
     pub fn name<'b>(&'b self) -> &'b str {
-        self.decl.inner().ident.inner()
+        self.decl.inner().ident.as_ref()
     }
 }
 
 impl<'a> Spanned for GlobalConstantDeclaration<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = GlobalConstantDeclaration<'a, spans::SpansErased>;
+    type Spanless = GlobalConstantDeclaration<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         GlobalConstantDeclaration {
-            decl: self.decl.erase_spans().map(Spanned::erase_spans),
+            decl: self.decl.erase_spans(),
             init: self.init.erase_spans(),
         }
     }
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for GlobalConstantDeclaration<'a, S> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for GlobalConstantDeclaration<'a, S> {
+    type Context<'b> = <Expression<'a, S> as EqIn<'a>>::Context<'b> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -247,35 +247,35 @@ impl<'a, S: spans::SpanState> EqIn<'a> for GlobalConstantDeclaration<'a, S> {
 }
 
 #[perfect_derive(Debug)]
-pub struct GlobalOverrideDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub attributes: Range<Handle<Attribute<'a, S>>>,
-    pub decl: spans::WithSpan<OptionallyTypedIdent<'a, S>, S>,
-    pub init: Option<Handle<Expression<'a, S>>>,
+pub struct GlobalOverrideDeclaration<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub attributes: Range<AttributeHandle<'a, S>>,
+    pub decl: SpannedParent<OptionallyTypedIdent<'a, S>, S>,
+    pub init: Option<ExpressionHandle<'a, S>>,
 }
 
-impl<'a, S: spans::SpanState> GlobalOverrideDeclaration<'a, S> {
+impl<'a, S: text_spans::SpanState> GlobalOverrideDeclaration<'a, S> {
     pub fn name<'b>(&'b self) -> &'b str {
-        self.decl.inner().ident.inner()
+        self.decl.inner().ident.as_ref()
     }
 }
 
 impl<'a> Spanned for GlobalOverrideDeclaration<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = GlobalOverrideDeclaration<'a, spans::SpansErased>;
+    type Spanless = GlobalOverrideDeclaration<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         GlobalOverrideDeclaration {
             attributes: self.attributes.erase_spans(),
-            decl: self.decl.erase_spans().map(Spanned::erase_spans),
+            decl: self.decl.erase_spans(),
             init: self.init.erase_spans(),
         }
     }
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for GlobalOverrideDeclaration<'a, S> {
-    type Context<'b> = (&'b crate::arena::Arena<Attribute<'a, S>, S>, &'b crate::arena::Arena<Expression<'a, S>, S>) where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for GlobalOverrideDeclaration<'a, S> {
+    type Context<'b> = (&'b super::attributes::AttributeArena<'a, S>, &'b super::expression::ExpressionArena<'a, S>) where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,

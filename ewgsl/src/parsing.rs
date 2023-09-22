@@ -9,15 +9,17 @@ pub mod statements;
 pub mod structs;
 pub mod variables;
 
+pub mod text_spans;
+
 use crate::{
-    arena::{Arena, Handle, HandleRange},
+    arena::Arena,
     parsing::{
         alias::TypeAliasDeclaration,
         functions::{FunctionDeclaration, FunctionHeader},
         variables::GlobalVariableDeclaration,
     },
-    spans::{self, Spanned, WithSpan},
 };
+use text_spans::Spanned;
 
 #[cfg(feature = "eq")]
 use crate::EqIn;
@@ -41,13 +43,17 @@ use pest::{iterators::Pair, Parser};
 use thiserror::Error;
 
 use self::{
-    attributes::{Attribute, AttributeIdentifier},
+    attributes::{Attribute, AttributeArena, AttributeHandle, AttributeIdentifier},
     const_assert::ConstAssertStatement,
-    expression::Expression,
-    functions::{FunctionResult, Parameter},
+    expression::{Expression, ExpressionArena, ExpressionHandle},
+    functions::{FunctionResult, Parameter, ParameterArena, ParameterHandle},
     ident::{Ident, TemplatedIdent},
-    statements::{ContinuingStatement, IfClause, Statement, SwitchClause},
-    structs::{StructDeclaration, StructMember},
+    statements::{
+        ContinuingStatement, IfClause, IfClauseArena, Statement, StatementArena, StatementHandle,
+        SwitchClause, SwitchClauseArena,
+    },
+    structs::{StructDeclaration, StructMember, StructMemberHandle},
+    text_spans::{SpannedLeaf, SpannedParent},
     variables::{GlobalConstantDeclaration, GlobalOverrideDeclaration},
 };
 
@@ -355,26 +361,9 @@ impl<'a> Display for ParseIssue<'a> {
                     )
                 }
             }
-            ParseIssue::InvalidIdentifier { inner, found } => match inner {
-                ident::InvalidIdentifierReason::WasSingleUnderscore => {
-                    write!(f, "`_` is not a valid identifier in this context")
-                }
-                ident::InvalidIdentifierReason::StartedWithDoubleUnderscore => {
-                    write!(f, "identifiers may not start with `__`")
-                }
-                ident::InvalidIdentifierReason::WasKeyword => {
-                    write!(
-                        f,
-                        "{found} is a keyword and so cannot be used as an identifier"
-                    )
-                }
-                ident::InvalidIdentifierReason::WasReservedWord => {
-                    write!(
-                        f,
-                        "{found} is a reserved word and so cannot be used as an identifier"
-                    )
-                }
-            },
+            ParseIssue::InvalidIdentifier { inner, found } => {
+                write!(f, "identifier `{found}` is invalid: {}", inner)
+            }
         }
     }
 }
@@ -438,7 +427,7 @@ impl<T> AsRef<Vec<T>> for NonEmptyVec<T> {
 #[derive(Debug)]
 pub struct ParseError<'a> {
     /// The set of issues encountered while parsing the module. Guaranteed to not be empty.
-    pub issues: NonEmptyVec<WithSpan<ParseIssue<'a>, spans::SpansPresent>>,
+    pub issues: NonEmptyVec<SpannedLeaf<ParseIssue<'a>, text_spans::SpansPresent>>,
     /// The module that was able to be parsed. This is useful to extract definitions from to help debug errors in
     /// modules that import this one.
     pub partial_module: ParsedModule<'a>,
@@ -549,7 +538,7 @@ impl<'a> Display for ErrorDiagnostics<'a> {
 pub type ParseResult<'a> = Result<ParsedModule<'a>, ParseError<'a>>;
 
 #[derive(Debug)]
-pub enum GlobalDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
+pub enum GlobalDeclaration<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
     Variable(GlobalVariableDeclaration<'a, S>),
     Constant(GlobalConstantDeclaration<'a, S>),
     Override(GlobalOverrideDeclaration<'a, S>),
@@ -561,7 +550,7 @@ pub enum GlobalDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
 
 impl<'a> Spanned for GlobalDeclaration<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = GlobalDeclaration<'a, spans::SpansErased>;
+    type Spanless = GlobalDeclaration<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -578,7 +567,7 @@ impl<'a> Spanned for GlobalDeclaration<'a> {
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
+impl<'a, S: text_spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
     type Context<'b> = ParsedModule<'a, S>
     where
         'a: 'b;
@@ -610,19 +599,9 @@ impl<'a, S: spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
             (GlobalDeclaration::Alias(lhs), GlobalDeclaration::Alias(rhs)) => {
                 lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions)
             }
-            (GlobalDeclaration::Struct(lhs), GlobalDeclaration::Struct(rhs)) => lhs.eq_in(
-                &(
-                    &own_context.attributes,
-                    &own_context.expressions,
-                    &own_context.members,
-                ),
-                rhs,
-                &(
-                    &other_context.attributes,
-                    &other_context.expressions,
-                    &other_context.members,
-                ),
-            ),
+            (GlobalDeclaration::Struct(lhs), GlobalDeclaration::Struct(rhs)) => {
+                lhs.eq_in(&own_context, rhs, &other_context)
+            }
             (GlobalDeclaration::ConstAssert(lhs), GlobalDeclaration::ConstAssert(rhs)) => {
                 lhs.eq_in(&own_context.expressions, rhs, &other_context.expressions)
             }
@@ -636,19 +615,19 @@ impl<'a, S: spans::SpanState> EqIn<'a> for GlobalDeclaration<'a, S> {
 
 /// A single module (source file), many of which can be unified into a shader.
 #[perfect_derive(Debug)]
-pub struct ParsedModule<'a, S: spans::SpanState = spans::SpansPresent> {
+pub struct ParsedModule<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
     pub directives: directives::Directives<S>,
-    pub attributes: Arena<Attribute<'a, S>, S>,
-    pub expressions: Arena<Expression<'a, S>, S>,
-    pub members: Arena<StructMember<'a, S>, S>,
-    pub parameters: Arena<Parameter<'a, S>, S>,
-    pub if_clauses: Arena<IfClause<'a, S>, S>,
-    pub switch_clauses: Arena<SwitchClause<'a, S>, S>,
-    pub statements: Arena<Statement<'a, S>, S>,
-    pub declarations: Arena<GlobalDeclaration<'a, S>, S>,
+    pub attributes: AttributeArena<'a, S>,
+    pub expressions: ExpressionArena<'a, S>,
+    pub members: Arena<SpannedParent<StructMember<'a, S>, S>>,
+    pub parameters: ParameterArena<'a, S>,
+    pub if_clauses: IfClauseArena<'a, S>,
+    pub switch_clauses: SwitchClauseArena<'a, S>,
+    pub statements: StatementArena<'a, S>,
+    pub declarations: Arena<SpannedParent<GlobalDeclaration<'a, S>, S>>,
 }
 
-impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
+impl<'a, S: text_spans::SpanState> ParsedModule<'a, S> {
     /// A module with no content. Equal to `ParsedModule::parse("")`.
     pub fn empty() -> Self {
         Self {
@@ -665,14 +644,14 @@ impl<'a, S: spans::SpanState> ParsedModule<'a, S> {
     }
 }
 
-impl<'a> ParsedModule<'a, spans::SpansPresent> {
+impl<'a> ParsedModule<'a, text_spans::SpansPresent> {
     pub fn parse(file_name: &'a str, source_code: &'a str) -> ParseResult<'a> {
         // Lex and process errors
         let parse_res = parser::EwgslParser::parse(parser::Rule::TRANSLATION_UNIT, source_code);
         let mut translation_units = match parse_res {
             Ok(pairs) => pairs,
             Err(parse_error) => {
-                let span = spans::Span::from(parse_error.location);
+                let span = text_spans::Span::from(parse_error.location);
 
                 let text = if span.start() >= source_code.len() {
                     "end of file"
@@ -698,7 +677,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                     pest::error::ErrorVariant::CustomError { message: _ } => unreachable!(),
                 };
                 return Err(ParseError {
-                    issues: NonEmptyVec::of_one(WithSpan::new(error, span)),
+                    issues: NonEmptyVec::of_one(SpannedLeaf::new(error, span)),
                     partial_module: ParsedModule::empty(),
                     file_name,
                     source_code,
@@ -774,7 +753,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Directives are things like `enable`, `require` and `diagnostics` statements.
     fn parse_global_directive(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         global_directive: Pair<'_, parser::Rule>,
     ) {
         debug_assert_eq!(global_directive.as_rule(), parser::Rule::GLOBAL_DIRECTIVE);
@@ -799,7 +778,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 let severity = match directives::SeverityControlName::parse(name.as_str()) {
                     Some(severity) => severity,
                     None => {
-                        issues.push(WithSpan::new(
+                        issues.push(SpannedLeaf::new(
                             ParseIssue::UnknownSeverity {
                                 found: name.as_str().to_owned(),
                             },
@@ -812,7 +791,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 module
                     .directives
                     .diagnostics
-                    .append(WithSpan::new(severity, span));
+                    .append(SpannedLeaf::new(severity, span));
             }
             // Of the form `enable [ident1], [ident2]...;`
             parser::Rule::ENABLE_DIRECTIVE => {
@@ -829,7 +808,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                     let extension = match directives::EnableExtensionName::parse(name.as_str()) {
                         Some(extension) => extension,
                         None => {
-                            issues.push(WithSpan::new(
+                            issues.push(SpannedLeaf::new(
                                 ParseIssue::UnknownEnableExtension {
                                     found: name.as_str().to_owned(),
                                 },
@@ -842,7 +821,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                     module
                         .directives
                         .enable_extensions
-                        .append(WithSpan::new(extension, name.as_span().into()));
+                        .append(SpannedLeaf::new(extension, name.as_span().into()));
                 }
             }
             // Of the form `requires [ident1], [ident2]...;`
@@ -860,7 +839,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                     let extension = match directives::SoftwareExtensionName::parse(name.as_str()) {
                         Some(extension) => extension,
                         None => {
-                            issues.push(WithSpan::new(
+                            issues.push(SpannedLeaf::new(
                                 ParseIssue::UnknownSoftwareExtension {
                                     found: name.as_str().to_owned(),
                                 },
@@ -873,7 +852,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                     module
                         .directives
                         .software_extensions
-                        .append(WithSpan::new(extension, name.as_span().into()));
+                        .append(SpannedLeaf::new(extension, name.as_span().into()));
                 }
             }
             _ => unreachable!(),
@@ -883,7 +862,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Declarations are constants, functions and types, and whatever else isn't a directive.
     fn parse_global_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         global_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(global_decl.as_rule(), parser::Rule::GLOBAL_DECL);
@@ -923,34 +902,35 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// An identifier. Just some characters without any templating or anything else.
     fn parse_ident(
         _module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         ident: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Ident<'a>>, ()> {
+    ) -> Result<Ident<'a>, ()> {
         debug_assert_eq!(ident.as_rule(), parser::Rule::IDENT);
         let span = ident.as_span().into();
 
-        let res = Ident::try_parse(ident.as_str());
+        let ident = SpannedLeaf::new(ident.as_str(), span);
+        let res = Ident::try_parse(ident);
         return match res {
             Err(e) => {
-                issues.push(WithSpan::new(
+                issues.push(SpannedLeaf::new(
                     ParseIssue::InvalidIdentifier {
                         inner: e,
-                        found: ident.as_str(),
+                        found: ident.inner(),
                     },
                     span,
                 ));
                 return Err(());
             }
-            Ok(res) => Ok(WithSpan::new(res, span)),
+            Ok(res) => Ok(res),
         };
     }
 
     /// A collection of template parameters, separated by commas
     fn parse_template_list(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         template_list: Pair<'a, parser::Rule>,
-    ) -> Result<Vec<WithSpan<Expression<'a>>>, ()> {
+    ) -> Result<Vec<SpannedParent<Expression<'a>>>, ()> {
         debug_assert_eq!(template_list.as_rule(), parser::Rule::TEMPLATE_LIST);
 
         let mut expressions = Vec::new();
@@ -969,7 +949,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     // An identifier possibly followed by some <template, args>
     fn parse_templated_ident(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         ident: Pair<'a, parser::Rule>,
     ) -> Result<TemplatedIdent<'a>, ()> {
         debug_assert_eq!(ident.as_rule(), parser::Rule::TEMPLATE_ELABORATED_IDENT);
@@ -1004,18 +984,18 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     ///
     fn parse_switch_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
         parse_options: impl FnOnce(
             parser::Rule,
         ) -> Box<
             dyn FnOnce(
                 &mut ParsedModule<'a>,
-                &mut Vec<WithSpan<ParseIssue<'a>>>,
+                &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
                 Pair<'a, parser::Rule>,
-            ) -> Result<WithSpan<Expression<'a>>, ()>,
+            ) -> Result<SpannedParent<Expression<'a>>, ()>,
         >,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         let inner_rule = expression.into_inner().next().unwrap();
 
         let parse_method = parse_options(inner_rule.as_rule());
@@ -1033,15 +1013,15 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// ```
     fn parse_singular_binary_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
         mut parse_sides: impl FnMut(
             &mut ParsedModule<'a>,
-            &mut Vec<WithSpan<ParseIssue<'a>>>,
+            &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
             Pair<'a, parser::Rule>,
-        ) -> Result<WithSpan<Expression<'a>>, ()>,
+        ) -> Result<SpannedParent<Expression<'a>>, ()>,
         operator: impl FnOnce(parser::Rule) -> expression::BinaryOperator,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         let expression_span = expression.as_span().into();
 
         let mut inner = expression.into_inner();
@@ -1055,7 +1035,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             let op_span = op.as_span().into();
             let op = operator(op.as_rule());
 
-            let op = WithSpan::new(op, op_span);
+            let op = SpannedLeaf::new(op, op_span);
 
             // Parse rhs
             let rhs = inner.next().unwrap();
@@ -1064,7 +1044,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
             if let Ok(lhs) = lhs.as_mut() {
                 let lhs_handle = module.expressions.append(lhs.clone());
-                *lhs = WithSpan::new(
+                *lhs = SpannedParent::new(
                     Expression::Binary {
                         lhs: lhs_handle,
                         op,
@@ -1086,15 +1066,15 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// ```
     fn parse_iterated_binary_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
         mut parse_sides: impl FnMut(
             &mut ParsedModule<'a>,
-            &mut Vec<WithSpan<ParseIssue<'a>>>,
+            &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
             Pair<'a, parser::Rule>,
-        ) -> Result<WithSpan<Expression<'a>>, ()>,
+        ) -> Result<SpannedParent<Expression<'a>>, ()>,
         operator: impl FnOnce(parser::Rule) -> expression::BinaryOperator,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         let expression_span = expression.as_span().into();
 
         let mut inner = expression.into_inner();
@@ -1105,7 +1085,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let op = inner.next().unwrap();
         let op_span = op.as_span().into();
         let op = operator(op.as_rule());
-        let op = WithSpan::new(op, op_span);
+        let op = SpannedLeaf::new(op, op_span);
 
         let mut rhs_list = vec![];
         while let Some(rhs) = inner.next() {
@@ -1129,7 +1109,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 op,
                 rhs: rhs_handle,
             };
-            lhs = WithSpan::new(lhs_expr, expression_span);
+            lhs = SpannedParent::new(lhs_expr, expression_span);
         }
 
         return Ok(lhs);
@@ -1146,15 +1126,15 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// ```
     fn parse_iterated_switch_binary_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
         mut parse_sides: impl FnMut(
             &mut ParsedModule<'a>,
-            &mut Vec<WithSpan<ParseIssue<'a>>>,
+            &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
             Pair<'a, parser::Rule>,
-        ) -> Result<WithSpan<Expression<'a>>, ()>,
+        ) -> Result<SpannedParent<Expression<'a>>, ()>,
         mut operator: impl FnMut(parser::Rule) -> expression::BinaryOperator,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         let expression_span = expression.as_span().into();
 
         let mut inner = expression.into_inner();
@@ -1167,7 +1147,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             let op = op.into_inner().next().unwrap(); // Unswitch
             let op_span = op.as_span().into();
             let op = operator(op.as_rule());
-            let op = WithSpan::new(op, op_span);
+            let op = SpannedLeaf::new(op, op_span);
 
             // Then get rhs
             let rhs = inner.next().unwrap();
@@ -1188,7 +1168,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 op,
                 rhs: rhs_handle,
             };
-            lhs = WithSpan::new(lhs_expr, expression_span);
+            lhs = SpannedParent::new(lhs_expr, expression_span);
         }
 
         return Ok(lhs);
@@ -1197,7 +1177,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Something of the form `foo<a, b>(x, y)`
     fn parse_call_prase(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         call_phrase: Pair<'a, parser::Rule>,
     ) -> Result<expression::CallPhrase<'a>, ()> {
         debug_assert_eq!(call_phrase.as_rule(), parser::Rule::CALL_PHRASE);
@@ -1224,9 +1204,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_literal_expression(
         _module: &mut ParsedModule<'a>,
-        _issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        _issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::LITERAL);
         let expression_span = expression.as_span().into();
 
@@ -1240,7 +1220,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             _ => unreachable!(),
         };
 
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             Expression::Literal { value: literal },
             expression_span,
         ));
@@ -1248,9 +1228,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_paren_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::PAREN_EXPRESSION);
         let expression_span = expression.as_span().into();
 
@@ -1261,7 +1241,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         debug_assert!(expression.next().is_none());
 
         let inner_expr = module.expressions.append(inner_expr);
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             Expression::Parenthesized(inner_expr),
             expression_span,
         ));
@@ -1269,9 +1249,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_call_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::CALL_EXPRESSION);
         let expression_span = expression.as_span().into();
 
@@ -1279,7 +1259,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let call_phrase = Self::parse_call_prase(module, issues, expression.next().unwrap())?;
         debug_assert!(expression.next().is_none());
 
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             Expression::Call(call_phrase),
             expression_span,
         ));
@@ -1287,9 +1267,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_ident_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(
             expression.as_rule(),
             parser::Rule::TEMPLATE_ELABORATED_IDENT
@@ -1298,7 +1278,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let ident = Self::parse_templated_ident(module, issues, expression)?;
 
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             Expression::Identifier { ident },
             expression_span,
         ));
@@ -1306,9 +1286,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_primary_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::PRIMARY_EXPRESSION);
 
         Self::parse_switch_expression(module, issues, expression, |rule| match rule {
@@ -1323,11 +1303,11 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Accessors are swizzles, members or index expressions, and can be stacked on top of an expression.
     fn parse_accessor_on_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         accessor: Pair<'a, parser::Rule>,
-        base_expression: Handle<Expression<'a>>,
-        composed_span: spans::Span,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+        base_expression: ExpressionHandle<'a>,
+        composed_span: text_spans::Span,
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(
             accessor.as_rule(),
             parser::Rule::COMPONENT_OR_SWIZZLE_SPECIFIER
@@ -1352,14 +1332,14 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                     .expect("swizzle pattern only matches valid swizzles");
                 Expression::Swizzle {
                     base: base_expression,
-                    swizzle: WithSpan::new(swizzle, accessor_span),
+                    swizzle: SpannedLeaf::new(swizzle, accessor_span),
                 }
             }
             parser::Rule::IDENT => {
                 let member_ident = inner.as_str();
                 Expression::MemberAccess {
                     base: base_expression,
-                    member: WithSpan::new(member_ident, accessor_span),
+                    member: SpannedLeaf::new(member_ident, accessor_span),
                 }
             }
             _ => unreachable!(),
@@ -1368,21 +1348,21 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let next = accessor.next();
         debug_assert!(next.is_none());
 
-        return Ok(WithSpan::new(accessed, composed_span));
+        return Ok(SpannedParent::new(accessed, composed_span));
     }
 
     fn parse_singular_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::SINGULAR_EXPRESSION);
 
         let mut inner = expression.into_inner();
 
         // A primary expression followed by 1 or more accessors
         let inner_expr = inner.next().unwrap();
-        let mut inner_span: spans::Span = inner_expr.as_span().into();
+        let mut inner_span: text_spans::Span = inner_expr.as_span().into();
         let mut inner_expr = Self::parse_primary_expression(module, issues, inner_expr)?;
 
         // If we find accessors, hand off to `parse_accessor_on_expression`
@@ -1403,9 +1383,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_unary_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::UNARY_EXPRESSION);
         let expression_span = expression.as_span().into();
 
@@ -1426,7 +1406,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             parser::Rule::_ASTERISK => expression::UnaryOperator::Dereference,
             _ => unreachable!(),
         };
-        let op = WithSpan::new(op, op_span);
+        let op = SpannedLeaf::new(op, op_span);
 
         // Then the expression - recurse
         let expression = inner.next().unwrap();
@@ -1437,14 +1417,14 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         // Create and return
         let expr = module.expressions.append(expr);
         let expr = Expression::Unary { op, expr };
-        return Ok(WithSpan::new(expr, expression_span));
+        return Ok(SpannedParent::new(expr, expression_span));
     }
 
     fn parse_bitwise_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::BITWISE_EXPRESSION);
 
         Self::parse_iterated_binary_expression(
@@ -1463,9 +1443,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_short_circuit_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert!(
             expression.as_rule() == parser::Rule::SHORT_CIRCUIT_EXPRESSION
                 || expression.as_rule() == parser::Rule::TEMPLATE_SHORT_CIRCUIT_EXPRESSION
@@ -1486,9 +1466,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_multiplicative_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(
             expression.as_rule(),
             parser::Rule::MULTIPLICATIVE_EXPRESSION
@@ -1510,9 +1490,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_additive_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert_eq!(expression.as_rule(), parser::Rule::ADDITIVE_EXPRESSION);
 
         Self::parse_iterated_switch_binary_expression(
@@ -1530,9 +1510,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_shift_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert!(
             expression.as_rule() == parser::Rule::SHIFT_EXPRESSION
                 || expression.as_rule() == parser::Rule::TEMPLATE_SHIFT_EXPRESSION
@@ -1560,7 +1540,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             parser::Rule::_SHIFT_RIGHT => expression::BinaryOperator::ShiftRight,
             _ => unreachable!(),
         };
-        let op = WithSpan::new(op, op_span);
+        let op = SpannedLeaf::new(op, op_span);
 
         // Get rhs
         let rhs = Self::parse_unary_expression(module, issues, inner.next().unwrap())?;
@@ -1568,7 +1548,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let lhs = module.expressions.append(lhs);
         let rhs = module.expressions.append(rhs);
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             Expression::Binary { lhs, op, rhs },
             expression_span,
         ));
@@ -1576,9 +1556,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_relational_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert!(
             expression.as_rule() == parser::Rule::RELATIONAL_EXPRESSION
                 || expression.as_rule() == parser::Rule::TEMPLATE_RELATIONAL_EXPRESSION
@@ -1603,9 +1583,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_expression(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         expression: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Expression<'a>>, ()> {
+    ) -> Result<SpannedParent<Expression<'a>>, ()> {
         debug_assert!(
             expression.as_rule() == parser::Rule::EXPRESSION
                 || expression.as_rule() == parser::Rule::TEMPLATE_EXPRESSION
@@ -1627,9 +1607,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Parses a single Rule::ATTRIBUTE
     fn parse_attribute(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         attribute: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Attribute<'a>>, ()> {
+    ) -> Result<SpannedParent<Attribute<'a>>, ()> {
         debug_assert_eq!(attribute.as_rule(), parser::Rule::ATTRIBUTE);
         let attribute_span = attribute.as_span().into();
 
@@ -1648,9 +1628,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         debug_assert_eq!(keyword.as_rule(), parser::Rule::IDENT);
         let keyword_span = keyword.as_span().into();
         let identifier = match attributes::AttributeIdentifier::parse(keyword.as_str()) {
-            Some(identifier) => WithSpan::new(identifier, keyword_span),
+            Some(identifier) => SpannedLeaf::new(identifier, keyword_span),
             None => {
-                issues.push(WithSpan::new(
+                issues.push(SpannedLeaf::new(
                     ParseIssue::UnknownAttributeIdentifier {
                         found: keyword.as_str().to_owned(),
                     },
@@ -1689,14 +1669,14 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             }
         };
 
-        return Ok(WithSpan::new(attribute, attribute_span));
+        return Ok(SpannedParent::new(attribute, attribute_span));
     }
 
     fn parse_attribute_set(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         attributes: Pair<'a, parser::Rule>,
-    ) -> HandleRange<Attribute<'a>> {
+    ) -> Range<AttributeHandle<'a>> {
         debug_assert_eq!(attributes.as_rule(), parser::Rule::ATTRIBUTE_SET);
 
         let mut found_attributes = vec![];
@@ -1712,7 +1692,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_type_specifier(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         ty: Pair<'a, parser::Rule>,
     ) -> Result<variables::TypeSpecifier<'a>, ()> {
         debug_assert_eq!(ty.as_rule(), parser::Rule::TYPE_SPECIFIER);
@@ -1727,7 +1707,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_optionally_typed_ident(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         ident: Pair<'a, parser::Rule>,
     ) -> Result<variables::OptionallyTypedIdent<'a>, ()> {
         debug_assert_eq!(ident.as_rule(), parser::Rule::OPTIONALLY_TYPED_IDENT);
@@ -1750,7 +1730,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_variable_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         variable_decl: Pair<'a, parser::Rule>,
     ) -> Result<variables::VariableDeclaration<'a>, ()> {
         assert_eq!(variable_decl.as_rule(), parser::Rule::VARIABLE_DECL);
@@ -1785,7 +1765,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Global variable declarations are global objects that use the `var` keyword, like bindings or workgroup memory.
     fn parse_global_variable_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         global_variable_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(
@@ -1821,10 +1801,10 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let rhs = rhs.map(|rhs| module.expressions.append(rhs));
         let global_var_decl = GlobalVariableDeclaration {
             attributes,
-            decl: WithSpan::new(lhs, lhs_span),
+            decl: SpannedParent::new(lhs, lhs_span),
             init: rhs,
         };
-        module.declarations.append(WithSpan::new(
+        module.declarations.append(SpannedParent::new(
             GlobalDeclaration::Variable(global_var_decl),
             global_variable_decl_span,
         ));
@@ -1833,7 +1813,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Global value declarations are either `const` or `override` expressions.
     fn parse_global_value_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         global_value_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(global_value_decl.as_rule(), parser::Rule::GLOBAL_VALUE_DECL);
@@ -1870,7 +1850,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             .map(|init| Self::parse_expression(module, issues, init));
 
         let decl = match decl {
-            Ok(decl) => WithSpan::new(decl, decl_span),
+            Ok(decl) => SpannedParent::new(decl, decl_span),
             Err(()) => return,
         };
         let init = match init {
@@ -1885,7 +1865,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 .expressions
                 .append(init.expect("all constants have an initial value"));
             let const_decl = variables::GlobalConstantDeclaration { decl, init };
-            module.declarations.append(WithSpan::new(
+            module.declarations.append(SpannedParent::new(
                 GlobalDeclaration::Constant(const_decl),
                 global_value_decl_span,
             ));
@@ -1896,7 +1876,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
                 decl,
                 init,
             };
-            module.declarations.append(WithSpan::new(
+            module.declarations.append(SpannedParent::new(
                 GlobalDeclaration::Override(override_decl),
                 global_value_decl_span,
             ));
@@ -1906,7 +1886,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Type alias declarations use the `alias` keyword.
     fn parse_type_alias_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         type_alias_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(type_alias_decl.as_rule(), parser::Rule::TYPE_ALIAS_DECL);
@@ -1940,7 +1920,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             ty: rhs,
         };
 
-        module.declarations.append(WithSpan::new(
+        module.declarations.append(SpannedParent::new(
             GlobalDeclaration::Alias(alias_decl),
             alias_span,
         ));
@@ -1949,9 +1929,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// A member of a struct definition
     fn parse_struct_member(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         struct_member: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<StructMember<'a>>, ()> {
+    ) -> Result<SpannedParent<StructMember<'a>>, ()> {
         debug_assert_eq!(struct_member.as_rule(), parser::Rule::STRUCT_MEMBER);
         let struct_member_span = struct_member.as_span().into();
 
@@ -1967,7 +1947,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let ident = ident?;
         let ty = ty?;
 
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             StructMember {
                 attributes,
                 ident,
@@ -1981,9 +1961,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Drops invalid members, reporting issues and returning the set of valid members.
     fn parse_struct_body(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         struct_body: Pair<'a, parser::Rule>,
-    ) -> WithSpan<Range<Handle<StructMember<'a>>>> {
+    ) -> SpannedParent<Range<StructMemberHandle<'a>>> {
         debug_assert_eq!(struct_body.as_rule(), parser::Rule::STRUCT_BODY_DECL);
         let struct_body_span = struct_body.as_span().into();
 
@@ -1995,13 +1975,13 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         }
 
         let members = module.members.append_all(members);
-        return WithSpan::new(members, struct_body_span);
+        return SpannedParent::new(members, struct_body_span);
     }
 
     /// Struct declarations use the `struct` keyword.
     fn parse_struct_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         struct_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(struct_decl.as_rule(), parser::Rule::STRUCT_DECL);
@@ -2028,7 +2008,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let struct_decl = StructDeclaration { ident, members };
 
-        module.declarations.append(WithSpan::new(
+        module.declarations.append(SpannedParent::new(
             GlobalDeclaration::Struct(struct_decl),
             struct_span,
         ));
@@ -2036,7 +2016,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_return_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::RETURN_STATEMENT);
@@ -2060,9 +2040,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_if_clause(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         if_clause: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<IfClause<'a>>, ()> {
+    ) -> Result<SpannedParent<IfClause<'a>>, ()> {
         debug_assert_eq!(if_clause.as_rule(), parser::Rule::IF_CLAUSE);
         let if_clause_span = if_clause.as_span().into();
 
@@ -2086,14 +2066,17 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let condition = module.expressions.append(condition);
         let body = module.statements.append_all(body);
-        return Ok(WithSpan::new(IfClause { condition, body }, if_clause_span));
+        return Ok(SpannedParent::new(
+            IfClause { condition, body },
+            if_clause_span,
+        ));
     }
 
     fn parse_else_if_clause(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         else_if_clause: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<IfClause<'a>>, ()> {
+    ) -> Result<SpannedParent<IfClause<'a>>, ()> {
         debug_assert_eq!(else_if_clause.as_rule(), parser::Rule::ELSE_IF_CLAUSE);
         let if_clause_span = else_if_clause.as_span().into();
 
@@ -2108,14 +2091,14 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let next = inner.next();
         debug_assert!(next.is_none());
 
-        return Ok(WithSpan::new(if_clause.unwrap(), if_clause_span));
+        return Ok(SpannedParent::new(if_clause.unwrap(), if_clause_span));
     }
 
     fn parse_else_clause(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         else_clause: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Range<Handle<Statement<'a>>>>, ()> {
+    ) -> Result<SpannedParent<Range<StatementHandle<'a>>>, ()> {
         debug_assert_eq!(else_clause.as_rule(), parser::Rule::ELSE_CLAUSE);
         let else_clause_span = else_clause.as_span().into();
 
@@ -2133,12 +2116,12 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         }
 
         let body = module.statements.append_all(body);
-        return Ok(WithSpan::new(body, else_clause_span));
+        return Ok(SpannedParent::new(body, else_clause_span));
     }
 
     fn parse_if_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::IF_STATEMENT);
@@ -2183,9 +2166,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_switch_clause(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         clause: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<SwitchClause<'a>>, ()> {
+    ) -> Result<SpannedParent<SwitchClause<'a>>, ()> {
         debug_assert_eq!(clause.as_rule(), parser::Rule::SWITCH_CLAUSE);
         let clause_span = clause.as_span().into();
 
@@ -2246,12 +2229,12 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             selectors,
             body,
         };
-        return Ok(WithSpan::new(clause, clause_span));
+        return Ok(SpannedParent::new(clause, clause_span));
     }
 
     fn parse_switch_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::SWITCH_STATEMENT);
@@ -2288,9 +2271,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_continuing_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<ContinuingStatement<'a>>, ()> {
+    ) -> Result<SpannedParent<ContinuingStatement<'a>>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::CONTINUING_STATEMENT);
         let continuing_span = statement.as_span().into();
 
@@ -2337,12 +2320,12 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             body,
             break_if,
         };
-        return Ok(WithSpan::new(continuing, continuing_span));
+        return Ok(SpannedParent::new(continuing, continuing_span));
     }
 
     fn parse_loop_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::LOOP_STATEMENT);
@@ -2380,7 +2363,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_for_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::FOR_STATEMENT);
@@ -2390,7 +2373,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_while_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::WHILE_STATEMENT);
@@ -2400,7 +2383,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_variable_or_value_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(
@@ -2413,7 +2396,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_break_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::BREAK_STATEMENT);
@@ -2423,7 +2406,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_continue_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::CONTINUE_STATEMENT);
@@ -2433,7 +2416,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_discard_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::DISCARD_KEYWORD);
@@ -2443,7 +2426,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_const_assert_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::CONST_ASSERT_STATEMENT);
@@ -2454,7 +2437,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Statements surrounded by curly braces
     fn parse_compound_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::COMPOUND_STATEMENT);
@@ -2464,7 +2447,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_variable_updating_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(
@@ -2477,7 +2460,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
     fn parse_func_call_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
     ) -> Result<Statement<'a>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::FUNC_CALL_STATEMENT);
@@ -2488,9 +2471,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Any statement
     fn parse_statement(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         statement: Pair<'a, parser::Rule>,
-    ) -> Result<Option<WithSpan<Statement<'a>>>, ()> {
+    ) -> Result<Option<SpannedParent<Statement<'a>>>, ()> {
         debug_assert_eq!(statement.as_rule(), parser::Rule::STATEMENT);
         let statement_span = statement.as_span().into();
 
@@ -2544,15 +2527,15 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
             _ => unreachable!(),
         };
 
-        return inner_statement.map(|res| Some(WithSpan::new(res, statement_span)));
+        return inner_statement.map(|res| Some(SpannedParent::new(res, statement_span)));
     }
 
     /// Parameters within a function
     fn parse_param(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         param: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<Parameter<'a>>, ()> {
+    ) -> Result<SpannedParent<Parameter<'a>>, ()> {
         debug_assert_eq!(param.as_rule(), parser::Rule::PARAM);
         let param_span = param.as_span().into();
 
@@ -2573,7 +2556,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let ident = ident?;
         let ty = ty?;
 
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             Parameter {
                 attributes,
                 ident,
@@ -2586,9 +2569,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Parameters within a function
     fn parse_param_list(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         params: Pair<'a, parser::Rule>,
-    ) -> Range<Handle<Parameter<'a>>> {
+    ) -> Range<ParameterHandle<'a>> {
         debug_assert_eq!(params.as_rule(), parser::Rule::PARAM_LIST);
 
         let inner = params.into_inner();
@@ -2607,9 +2590,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Return value of a function
     fn parse_result(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         result: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<FunctionResult<'a>>, ()> {
+    ) -> Result<SpannedParent<FunctionResult<'a>>, ()> {
         debug_assert_eq!(result.as_rule(), parser::Rule::FUNCTION_RESULT);
         let result_span = result.as_span().into();
 
@@ -2624,7 +2607,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let next = inner.next();
         debug_assert!(next.is_none());
 
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             FunctionResult { attributes, ty },
             result_span,
         ));
@@ -2633,9 +2616,9 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// The signature of a function
     fn parse_function_header(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         function_header: Pair<'a, parser::Rule>,
-    ) -> Result<WithSpan<FunctionHeader<'a>>, ()> {
+    ) -> Result<SpannedParent<FunctionHeader<'a>>, ()> {
         debug_assert_eq!(function_header.as_rule(), parser::Rule::FUNCTION_HEADER);
         let function_header_span = function_header.as_span().into();
 
@@ -2660,7 +2643,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let ident = ident?;
 
-        return Ok(WithSpan::new(
+        return Ok(SpannedParent::new(
             FunctionHeader {
                 ident,
                 parameters,
@@ -2673,7 +2656,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Function declarations use the `fn` keyword.
     fn parse_function_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         function_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(function_decl.as_rule(), parser::Rule::FUNCTION_DECL);
@@ -2702,7 +2685,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
 
         let body = module.statements.append_all(body);
 
-        module.declarations.append(WithSpan::new(
+        module.declarations.append(SpannedParent::new(
             GlobalDeclaration::Function(FunctionDeclaration {
                 attributes,
                 header,
@@ -2715,7 +2698,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// Const assert declarations use the `const_assert` keyword.
     fn parse_const_assert_decl(
         module: &mut ParsedModule<'a>,
-        issues: &mut Vec<WithSpan<ParseIssue<'a>>>,
+        issues: &mut Vec<SpannedLeaf<ParseIssue<'a>>>,
         const_assert_decl: Pair<'a, parser::Rule>,
     ) {
         debug_assert_eq!(
@@ -2740,7 +2723,7 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
         let next = inner.next();
         debug_assert!(next.is_none());
 
-        module.declarations.append(WithSpan::new(
+        module.declarations.append(SpannedParent::new(
             GlobalDeclaration::ConstAssert(ConstAssertStatement { expr }),
             const_assert_span,
         ));
@@ -2759,57 +2742,39 @@ impl<'a> ParsedModule<'a, spans::SpansPresent> {
     /// assert!(mod1 != mod2);
     /// assert!(mod1.erase_spans() == mod2.erase_spans());
     /// ```
-    pub fn erase_spans(self) -> ParsedModule<'a, spans::SpansErased> {
+    pub fn erase_spans(self) -> ParsedModule<'a, text_spans::SpansErased> {
         Spanned::erase_spans(self)
     }
 }
 
 impl<'a> Spanned for ParsedModule<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = ParsedModule<'a, spans::SpansErased>;
+    type Spanless = ParsedModule<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         ParsedModule {
             directives: self.directives.erase_spans(),
-            attributes: self.attributes.erase_spans().map(|attr| attr.erase_spans()),
-            expressions: self
-                .expressions
-                .erase_spans()
-                .map(|expr| expr.erase_spans()),
-            members: self
-                .members
-                .erase_spans()
-                .map(|member| member.erase_spans()),
-            parameters: self
-                .parameters
-                .erase_spans()
-                .map(|param| param.erase_spans()),
-            if_clauses: self
-                .if_clauses
-                .erase_spans()
-                .map(|clause| clause.erase_spans()),
-            switch_clauses: self
-                .switch_clauses
-                .erase_spans()
-                .map(|clause| clause.erase_spans()),
-            statements: self
-                .statements
-                .erase_spans()
-                .map(|statement| statement.erase_spans()),
-            declarations: self.declarations.erase_spans().map(|dec| dec.erase_spans()),
+            attributes: self.attributes.erase_spans(),
+            expressions: self.expressions.erase_spans(),
+            members: self.members.erase_spans(),
+            parameters: self.parameters.erase_spans(),
+            if_clauses: self.if_clauses.erase_spans(),
+            switch_clauses: self.switch_clauses.erase_spans(),
+            statements: self.statements.erase_spans(),
+            declarations: self.declarations.erase_spans(),
         }
     }
 }
 
-impl<'a, S: spans::SpanState> Default for ParsedModule<'a, S> {
+impl<'a, S: text_spans::SpanState> Default for ParsedModule<'a, S> {
     fn default() -> Self {
         Self::empty()
     }
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> PartialEq for ParsedModule<'a, S>
+impl<'a, S: text_spans::SpanState> PartialEq for ParsedModule<'a, S>
 where
     directives::Directives<S>: PartialEq,
 {
@@ -2834,27 +2799,26 @@ where
     }
 }
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> Eq for ParsedModule<'a, S> where Self: PartialEq {}
+impl<'a, S: text_spans::SpanState> Eq for ParsedModule<'a, S> where Self: PartialEq {}
 
 const _: () = {
     // Check ParsedModule is always Debug
     fn assert_debug<T: Debug>() {}
     fn assert_all() {
-        assert_debug::<ParsedModule<'static, spans::SpansPresent>>();
+        assert_debug::<ParsedModule<'static, text_spans::SpansPresent>>();
         #[cfg(feature = "span_erasure")]
-        assert_debug::<ParsedModule<'static, spans::SpansErased>>();
+        assert_debug::<ParsedModule<'static, text_spans::SpansErased>>();
     }
 };
 
 #[cfg(test)]
 mod tests {
+    use super::{text_spans::Span, *};
     use crate::arena::arena;
-    use crate::spans::Span;
 
     use super::{
         expression::{BinaryOperator, CallPhrase},
         variables::{OptionallyTypedIdent, TypeSpecifier, VariableDeclaration},
-        *,
     };
 
     #[test]
@@ -2972,7 +2936,7 @@ mod tests {
 
     fn assert_parse_valid_succeeds<'a>(
         valid: &'a str,
-        expected: ParsedModule<'a, spans::SpansErased>,
+        expected: ParsedModule<'a, text_spans::SpansErased>,
     ) {
         let res = ParsedModule::parse("valid_module_test.ewgsl", valid);
 
@@ -3047,9 +3011,9 @@ mod tests {
     fn parse_valid_succeeds_case_directives_01() {
         assert_parse_valid_succeeds(
             "diagnostic error;",
-            ParsedModule::<spans::SpansErased> {
+            ParsedModule::<text_spans::SpansErased> {
                 directives: directives::Directives {
-                    diagnostics: arena![directives::SeverityControlName::Error],
+                    diagnostics: arena![directives::SeverityControlName::Error.into()],
                     ..directives::Directives::default()
                 },
                 ..ParsedModule::default()
@@ -3060,9 +3024,9 @@ mod tests {
     fn parse_valid_succeeds_case_directives_02() {
         assert_parse_valid_succeeds(
             "\t\tdiagnostic\n info\r\n;",
-            ParsedModule::<spans::SpansErased> {
+            ParsedModule::<text_spans::SpansErased> {
                 directives: directives::Directives {
-                    diagnostics: arena![directives::SeverityControlName::Info],
+                    diagnostics: arena![directives::SeverityControlName::Info.into()],
                     ..directives::Directives::default()
                 },
                 ..ParsedModule::default()
@@ -3073,11 +3037,11 @@ mod tests {
     fn parse_valid_succeeds_case_directives_03() {
         assert_parse_valid_succeeds(
             "diagnostic error;\ndiagnostic info;",
-            ParsedModule::<spans::SpansErased> {
+            ParsedModule::<text_spans::SpansErased> {
                 directives: directives::Directives {
                     diagnostics: arena![
-                        directives::SeverityControlName::Error,
-                        directives::SeverityControlName::Info,
+                        directives::SeverityControlName::Error.into(),
+                        directives::SeverityControlName::Info.into(),
                     ],
                     ..directives::Directives::default()
                 },
@@ -3089,10 +3053,10 @@ mod tests {
     fn parse_valid_succeeds_case_directives_04() {
         assert_parse_valid_succeeds(
             "diagnostic warning;\r\nenable f16;",
-            ParsedModule::<spans::SpansErased> {
+            ParsedModule::<text_spans::SpansErased> {
                 directives: directives::Directives {
-                    diagnostics: arena![directives::SeverityControlName::Warning],
-                    enable_extensions: arena![directives::EnableExtensionName::F16],
+                    diagnostics: arena![directives::SeverityControlName::Warning.into()],
+                    enable_extensions: arena![directives::EnableExtensionName::F16.into()],
                     ..directives::Directives::default()
                 },
                 ..ParsedModule::default()
@@ -3118,12 +3082,12 @@ mod tests {
             // Really make sure F16s are enabled
             enable f16;
             ",
-            ParsedModule::<spans::SpansErased> {
+            ParsedModule::<text_spans::SpansErased> {
                 directives: directives::Directives {
-                    diagnostics: arena![directives::SeverityControlName::Warning],
+                    diagnostics: arena![directives::SeverityControlName::Warning.into()],
                     enable_extensions: arena![
-                        directives::EnableExtensionName::F16,
-                        directives::EnableExtensionName::F16,
+                        directives::EnableExtensionName::F16.into(),
+                        directives::EnableExtensionName::F16.into(),
                     ],
                     ..directives::Directives::default()
                 },
@@ -3136,24 +3100,24 @@ mod tests {
     fn parse_valid_succeeds_case_global_var_01() {
         let src = "@group(0) @binding(0) var<storage> foo: array<vec3<f32>>;";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
         let f32_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("f32").unwrap().into(),
+                ident: Ident::try_parse("f32".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![]),
             },
         }
         .into();
         let vec_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("vec3").unwrap().into(),
+                ident: Ident::try_parse("vec3".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![f32_arg]),
             },
         }
         .into();
         let storage_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("storage").unwrap().into(),
+                ident: Ident::try_parse("storage".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![]),
             },
         }
@@ -3182,9 +3146,9 @@ mod tests {
                 decl: VariableDeclaration {
                     template_list: expected_module.expressions.append_all(vec![storage_arg]),
                     ident: OptionallyTypedIdent {
-                        ident: Ident::try_parse("foo").unwrap().into(),
+                        ident: Ident::try_parse("foo".into()).unwrap(),
                         ty: Some(TypeSpecifier(TemplatedIdent {
-                            ident: Ident::try_parse("array").unwrap().into(),
+                            ident: Ident::try_parse("array".into()).unwrap(),
                             args: expected_module.expressions.append_all(vec![vec_arg]),
                         })),
                     },
@@ -3201,10 +3165,10 @@ mod tests {
     fn parse_valid_succeeds_case_global_var_02() {
         let src = "@must_use var<private> bar: array<u32, 4> = array<u32, 4>(1,1,2,3);";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
         let u32_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("u32").unwrap().into(),
+                ident: Ident::try_parse("u32".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![]),
             },
         };
@@ -3214,7 +3178,7 @@ mod tests {
 
         let private_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("private").unwrap().into(),
+                ident: Ident::try_parse("private".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![]),
             },
         }
@@ -3250,7 +3214,7 @@ mod tests {
         let rhs = expected_module.expressions.append(
             Expression::Call(CallPhrase {
                 ident: TemplatedIdent {
-                    ident: Ident::try_parse("array").unwrap().into(),
+                    ident: Ident::try_parse("array".into()).unwrap(),
                     args: template_args,
                 },
                 args: call_args,
@@ -3264,9 +3228,9 @@ mod tests {
                 decl: VariableDeclaration {
                     template_list: expected_module.expressions.append_all(vec![private_arg]),
                     ident: OptionallyTypedIdent {
-                        ident: Ident::try_parse("bar").unwrap().into(),
+                        ident: Ident::try_parse("bar".into()).unwrap(),
                         ty: Some(TypeSpecifier(TemplatedIdent {
-                            ident: Ident::try_parse("array").unwrap().into(),
+                            ident: Ident::try_parse("array".into()).unwrap(),
                             args: expected_module
                                 .expressions
                                 .append_all(vec![u32_arg.into(), four.into()]),
@@ -3318,10 +3282,10 @@ mod tests {
     fn parse_valid_succeeds_case_global_const_01() {
         let src = "const v: vec2<u32> = vec2(0, 0);";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
         let u32_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("u32").unwrap().into(),
+                ident: Ident::try_parse("u32".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![]),
             },
         }
@@ -3341,7 +3305,7 @@ mod tests {
         let rhs = expected_module.expressions.append(
             Expression::Call(CallPhrase {
                 ident: TemplatedIdent {
-                    ident: Ident::try_parse("vec2").unwrap().into(),
+                    ident: Ident::try_parse("vec2".into()).unwrap(),
                     args: template_args,
                 },
                 args: call_args,
@@ -3352,9 +3316,9 @@ mod tests {
         expected_module.declarations.append(
             GlobalDeclaration::Constant(GlobalConstantDeclaration {
                 decl: OptionallyTypedIdent {
-                    ident: Ident::try_parse("v").unwrap().into(),
+                    ident: Ident::try_parse("v".into()).unwrap(),
                     ty: Some(TypeSpecifier(TemplatedIdent {
-                        ident: Ident::try_parse("vec2").unwrap().into(),
+                        ident: Ident::try_parse("vec2".into()).unwrap(),
                         args: expected_module.expressions.append_all(vec![u32_arg]),
                     })),
                 }
@@ -3387,7 +3351,7 @@ mod tests {
     fn parse_valid_succeeds_case_global_override_01() {
         let src = "@id(1) override is_something = false;";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
         let one = expected_module.expressions.append(
             Expression::Literal {
                 value: expression::Literal::Int("1"),
@@ -3411,7 +3375,7 @@ mod tests {
             GlobalDeclaration::Override(GlobalOverrideDeclaration {
                 attributes: attr,
                 decl: OptionallyTypedIdent {
-                    ident: Ident::try_parse("is_something").unwrap().into(),
+                    ident: Ident::try_parse("is_something".into()).unwrap(),
                     ty: None,
                 }
                 .into(),
@@ -3453,10 +3417,10 @@ mod tests {
     fn parse_valid_succeeds_case_global_alias_01() {
         let src = "alias MyAlias = vec3<u32>;";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
         let u32_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("u32").unwrap().into(),
+                ident: Ident::try_parse("u32".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![]),
             },
         }
@@ -3464,9 +3428,9 @@ mod tests {
 
         expected_module.declarations.append(
             GlobalDeclaration::Alias(TypeAliasDeclaration {
-                ident: Ident::try_parse("MyAlias").unwrap().into(),
+                ident: Ident::try_parse("MyAlias".into()).unwrap(),
                 ty: TypeSpecifier(TemplatedIdent {
-                    ident: Ident::try_parse("vec3").unwrap().into(),
+                    ident: Ident::try_parse("vec3".into()).unwrap(),
                     args: expected_module.expressions.append_all(vec![u32_arg]),
                 }),
             })
@@ -3499,7 +3463,7 @@ mod tests {
             }
         ";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
 
         let four = expected_module.expressions.append(
             Expression::Literal {
@@ -3527,7 +3491,7 @@ mod tests {
 
         let f32_arg = Expression::Identifier {
             ident: TemplatedIdent {
-                ident: Ident::try_parse("f32").unwrap().into(),
+                ident: Ident::try_parse("f32".into()).unwrap(),
                 args: expected_module.expressions.append_all(vec![]),
             },
         }
@@ -3538,18 +3502,18 @@ mod tests {
             .append_all(vec![
                 StructMember {
                     attributes: attrs1,
-                    ident: Ident::try_parse("v1").unwrap().into(),
+                    ident: Ident::try_parse("v1".into()).unwrap(),
                     ty: TypeSpecifier(TemplatedIdent {
-                        ident: Ident::try_parse("u32").unwrap().into(),
+                        ident: Ident::try_parse("u32".into()).unwrap(),
                         args: expected_module.expressions.append_all(vec![]),
                     }),
                 }
                 .into(),
                 StructMember {
                     attributes: attrs2,
-                    ident: Ident::try_parse("v2").unwrap().into(),
+                    ident: Ident::try_parse("v2".into()).unwrap(),
                     ty: TypeSpecifier(TemplatedIdent {
-                        ident: Ident::try_parse("vec3").unwrap().into(),
+                        ident: Ident::try_parse("vec3".into()).unwrap(),
                         args: expected_module.expressions.append_all(vec![f32_arg]),
                     }),
                 }
@@ -3559,7 +3523,7 @@ mod tests {
 
         expected_module.declarations.append(
             GlobalDeclaration::Struct(StructDeclaration {
-                ident: Ident::try_parse("Foo").unwrap().into(),
+                ident: Ident::try_parse("Foo".into()).unwrap(),
                 members,
             })
             .into(),
@@ -3586,13 +3550,13 @@ mod tests {
     fn parse_valid_succeeds_case_global_const_assert_01() {
         let src = "const_assert A < B;";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
 
         let empty_args = expected_module.expressions.append_all(vec![]);
         let a = expected_module.expressions.append(
             Expression::Identifier {
                 ident: TemplatedIdent {
-                    ident: Ident::try_parse("A").unwrap().into(),
+                    ident: Ident::try_parse("A".into()).unwrap(),
                     args: empty_args.clone(),
                 },
             }
@@ -3601,7 +3565,7 @@ mod tests {
         let b = expected_module.expressions.append(
             Expression::Identifier {
                 ident: TemplatedIdent {
-                    ident: Ident::try_parse("B").unwrap().into(),
+                    ident: Ident::try_parse("B".into()).unwrap(),
                     args: empty_args,
                 },
             }
@@ -3641,7 +3605,7 @@ mod tests {
     fn parse_valid_succeeds_case_fn_01() {
         let src = "fn foo(a: u32, b: f32) -> i32 { return a - b; }";
 
-        let mut expected_module = ParsedModule::<spans::SpansErased>::empty();
+        let mut expected_module = ParsedModule::<text_spans::SpansErased>::empty();
 
         let empty_attributes = expected_module.attributes.append_all(vec![]);
 
@@ -3650,18 +3614,18 @@ mod tests {
         let parameters = expected_module.parameters.append_all(vec![
             Parameter {
                 attributes: empty_attributes.clone(),
-                ident: Ident::try_parse("a").unwrap().into(),
+                ident: Ident::try_parse("a".into()).unwrap(),
                 ty: TypeSpecifier(TemplatedIdent {
-                    ident: Ident::try_parse("u32").unwrap().into(),
+                    ident: Ident::try_parse("u32".into()).unwrap(),
                     args: empty_args.clone(),
                 }),
             }
             .into(),
             Parameter {
                 attributes: empty_attributes.clone(),
-                ident: Ident::try_parse("b").unwrap().into(),
+                ident: Ident::try_parse("b".into()).unwrap(),
                 ty: TypeSpecifier(TemplatedIdent {
-                    ident: Ident::try_parse("f32").unwrap().into(),
+                    ident: Ident::try_parse("f32".into()).unwrap(),
                     args: empty_args.clone(),
                 }),
             }
@@ -3671,7 +3635,7 @@ mod tests {
         let a = expected_module.expressions.append(
             Expression::Identifier {
                 ident: TemplatedIdent {
-                    ident: Ident::try_parse("a").unwrap().into(),
+                    ident: Ident::try_parse("a".into()).unwrap(),
                     args: empty_args.clone(),
                 },
             }
@@ -3680,7 +3644,7 @@ mod tests {
         let b = expected_module.expressions.append(
             Expression::Identifier {
                 ident: TemplatedIdent {
-                    ident: Ident::try_parse("b").unwrap().into(),
+                    ident: Ident::try_parse("b".into()).unwrap(),
                     args: empty_args.clone(),
                 },
             }
@@ -3702,13 +3666,13 @@ mod tests {
             GlobalDeclaration::Function(FunctionDeclaration {
                 attributes: empty_attributes.clone(),
                 header: FunctionHeader {
-                    ident: Ident::try_parse("foo").unwrap().into(),
+                    ident: Ident::try_parse("foo".into()).unwrap(),
                     parameters,
                     result: Some(
                         FunctionResult {
                             attributes: empty_attributes.clone(),
                             ty: TemplatedIdent {
-                                ident: Ident::try_parse("i32").unwrap().into(),
+                                ident: Ident::try_parse("i32".into()).unwrap(),
                                 args: empty_args.clone(),
                             },
                         }
@@ -3722,5 +3686,13 @@ mod tests {
         );
 
         assert_parse_valid_succeeds(src, expected_module)
+    }
+
+    #[test]
+    fn tmp() {
+        let v = SpannedLeaf::new(
+            SpannedLeaf::new(32, text_spans::Span::empty()),
+            text_spans::Span::empty(),
+        );
     }
 }

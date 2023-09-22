@@ -1,25 +1,32 @@
 use std::ops::Range;
 
-use crate::{
-    arena::Handle,
-    spans::{self, Spanned, WithSpan},
+use crate::arena::{Arena, Handle};
+
+use super::{
+    attributes::{Attribute, AttributeHandle},
+    ident::Ident,
+    text_spans::{self, Spanned, SpannedParent},
+    variables::TypeSpecifier,
 };
 
-use super::{attributes::Attribute, ident::Ident, variables::TypeSpecifier};
+pub type StructMemberArena<'a, S = text_spans::SpansPresent> =
+    Arena<SpannedParent<StructMember<'a, S>, S>>;
+pub type StructMemberHandle<'a, S = text_spans::SpansPresent> =
+    Handle<SpannedParent<StructMember<'a, S>, S>>;
 
 #[cfg(feature = "eq")]
 use crate::EqIn;
 
 #[derive(Debug)]
-pub struct StructMember<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub attributes: Range<Handle<Attribute<'a, S>>>,
-    pub ident: WithSpan<Ident<'a>, S>,
+pub struct StructMember<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub attributes: Range<AttributeHandle<'a, S>>,
+    pub ident: Ident<'a, S>,
     pub ty: TypeSpecifier<'a, S>,
 }
 
 impl<'a> Spanned for StructMember<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = StructMember<'a, spans::SpansErased>;
+    type Spanless = StructMember<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -32,8 +39,8 @@ impl<'a> Spanned for StructMember<'a> {
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for StructMember<'a, S> {
-    type Context<'b> = (&'b crate::arena::Arena<Attribute<'a, S>, S>, &'b crate::arena::Arena<super::expression::Expression<'a, S>, S>)
+impl<'a, S: text_spans::SpanState> EqIn<'a> for StructMember<'a, S> {
+    type Context<'b> = super::ParsedModule<'a, S>
     where
         'a: 'b;
 
@@ -49,16 +56,20 @@ impl<'a, S: spans::SpanState> EqIn<'a> for StructMember<'a, S> {
 
         if !Attribute::are_sets_eq_in(
             self.attributes.clone(),
-            own_context.0,
-            own_context.1,
+            &own_context.attributes,
+            &own_context.expressions,
             other.attributes.clone(),
-            other_context.0,
-            other_context.1,
+            &other_context.attributes,
+            &other_context.expressions,
         ) {
             return false;
         }
 
-        if !self.ty.eq_in(own_context.1, &other.ty, other_context.1) {
+        if !self.ty.eq_in(
+            &own_context.expressions,
+            &other.ty,
+            &other_context.expressions,
+        ) {
             return false;
         }
 
@@ -67,27 +78,27 @@ impl<'a, S: spans::SpanState> EqIn<'a> for StructMember<'a, S> {
 }
 
 #[derive(Debug)]
-pub struct StructDeclaration<'a, S: spans::SpanState = spans::SpansPresent> {
-    pub ident: WithSpan<Ident<'a>, S>,
-    pub members: WithSpan<Range<Handle<StructMember<'a, S>>>, S>,
+pub struct StructDeclaration<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub ident: Ident<'a, S>,
+    pub members: SpannedParent<Range<StructMemberHandle<'a, S>>, S>,
 }
 
 impl<'a> Spanned for StructDeclaration<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = StructDeclaration<'a, spans::SpansErased>;
+    type Spanless = StructDeclaration<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
         StructDeclaration {
             ident: self.ident.erase_spans(),
-            members: self.members.erase_spans().map(Spanned::erase_spans),
+            members: self.members.erase_spans(),
         }
     }
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for StructDeclaration<'a, S> {
-    type Context<'b> = (&'b crate::arena::Arena<Attribute<'a, S>, S>, &'b crate::arena::Arena<super::expression::Expression<'a, S>, S>, &'b crate::arena::Arena<StructMember<'a, S>, S>)
+impl<'a, S: text_spans::SpanState> EqIn<'a> for StructDeclaration<'a, S> {
+    type Context<'b> = super::ParsedModule<'a, S>
     where
         'a: 'b;
 
@@ -102,17 +113,13 @@ impl<'a, S: spans::SpanState> EqIn<'a> for StructDeclaration<'a, S> {
         }
 
         // Order of members matters
-        let lhs_members = &own_context.2[self.members.inner().clone()];
-        let rhs_members = &other_context.2[other.members.inner().clone()];
+        let lhs_members = &own_context.members[self.members.inner().clone()];
+        let rhs_members = &other_context.members[other.members.inner().clone()];
         if lhs_members.len() != rhs_members.len() {
             return false;
         }
         for (lhs, rhs) in lhs_members.into_iter().zip(rhs_members) {
-            if !lhs.eq_in(
-                &(own_context.0, own_context.1),
-                rhs,
-                &(other_context.0, other_context.1),
-            ) {
+            if !lhs.eq_in(&own_context, rhs, &other_context) {
                 return false;
             }
         }

@@ -2,9 +2,9 @@ use perfect_derive::perfect_derive;
 use std::str::FromStr;
 use strum::VariantNames;
 
-use crate::{arena::Arena, join_into_readable_list, spans::Spanned};
+use crate::{arena::Arena, join_into_readable_list};
 
-use super::spans;
+use super::text_spans::{self, Spanned, SpannedLeaf};
 
 #[derive(
     Debug,
@@ -140,13 +140,13 @@ impl SoftwareExtensionName {
 
 /// A set of directives, occuring before definitions in a module.
 #[perfect_derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Directives<S: spans::SpanState = spans::SpansPresent> {
-    pub diagnostics: Arena<SeverityControlName, S>,
-    pub enable_extensions: Arena<EnableExtensionName, S>,
-    pub software_extensions: Arena<SoftwareExtensionName, S>,
+pub struct Directives<S: text_spans::SpanState = text_spans::SpansPresent> {
+    pub diagnostics: Arena<SpannedLeaf<SeverityControlName, S>>,
+    pub enable_extensions: Arena<SpannedLeaf<EnableExtensionName, S>>,
+    pub software_extensions: Arena<SpannedLeaf<SoftwareExtensionName, S>>,
 }
 
-impl<S: spans::SpanState> Directives<S> {
+impl<S: text_spans::SpanState> Directives<S> {
     pub fn empty() -> Self {
         Self {
             diagnostics: Arena::new(),
@@ -156,9 +156,9 @@ impl<S: spans::SpanState> Directives<S> {
     }
 }
 
-impl Spanned for Directives<spans::SpansPresent> {
+impl Spanned for Directives<text_spans::SpansPresent> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = Directives<spans::SpansErased>;
+    type Spanless = Directives<text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -170,7 +170,7 @@ impl Spanned for Directives<spans::SpansPresent> {
     }
 }
 
-impl<S: spans::SpanState> Default for Directives<S> {
+impl<S: text_spans::SpanState> Default for Directives<S> {
     fn default() -> Self {
         Self::empty()
     }

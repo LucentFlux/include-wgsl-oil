@@ -2,12 +2,17 @@ use std::ops::Range;
 
 use perfect_derive::perfect_derive;
 
-use crate::{
-    arena::Handle,
-    spans::{self, Spanned, WithSpan},
+use crate::arena::{Arena, Handle};
+
+use super::{
+    ident::TemplatedIdent,
+    text_spans::{self, Spanned, SpannedLeaf, SpannedParent},
 };
 
-use super::ident::TemplatedIdent;
+pub type ExpressionArena<'a, S = text_spans::SpansPresent> =
+    Arena<SpannedParent<Expression<'a, S>, S>>;
+pub type ExpressionHandle<'a, S = text_spans::SpansPresent> =
+    Handle<SpannedParent<Expression<'a, S>, S>>;
 
 #[cfg(feature = "eq")]
 use crate::EqIn;
@@ -140,22 +145,22 @@ impl Swizzle {
 }
 
 #[perfect_derive(Debug, Clone)]
-pub struct CallPhrase<'a, S: spans::SpanState = spans::SpansPresent> {
+pub struct CallPhrase<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
     pub ident: TemplatedIdent<'a, S>,
-    pub args: Range<Handle<Expression<'a, S>>>,
+    pub args: Range<ExpressionHandle<'a, S>>,
 }
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for CallPhrase<'a, S> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S>
+impl<'a, S: text_spans::SpanState> EqIn<'a> for CallPhrase<'a, S> {
+    type Context<'b> = ExpressionArena<'a, S>
     where
         'a: 'b;
 
     fn eq_in(
         &self,
-        lhs_arena: &crate::arena::Arena<Expression<'a, S>, S>,
+        lhs_arena: &ExpressionArena<'a, S>,
         rhs: &Self,
-        rhs_arena: &crate::arena::Arena<Expression<'a, S>, S>,
+        rhs_arena: &ExpressionArena<'a, S>,
     ) -> bool {
         if !self.ident.eq_in(lhs_arena, &rhs.ident, rhs_arena) {
             return false;
@@ -178,7 +183,7 @@ impl<'a, S: spans::SpanState> EqIn<'a> for CallPhrase<'a, S> {
 
 impl<'a> Spanned for CallPhrase<'a> {
     #[cfg(feature = "span_erasure")]
-    type Spanless = CallPhrase<'a, spans::SpansErased>;
+    type Spanless = CallPhrase<'a, text_spans::SpansErased>;
 
     #[cfg(feature = "span_erasure")]
     fn erase_spans(self) -> Self::Spanless {
@@ -190,7 +195,7 @@ impl<'a> Spanned for CallPhrase<'a> {
 }
 
 #[perfect_derive(Debug, Clone)]
-pub enum Expression<'a, S: spans::SpanState = spans::SpansPresent> {
+pub enum Expression<'a, S: text_spans::SpanState = text_spans::SpansPresent> {
     Literal {
         value: Literal<'a>,
     },
@@ -199,86 +204,42 @@ pub enum Expression<'a, S: spans::SpanState = spans::SpansPresent> {
     },
     Call(CallPhrase<'a, S>),
     Unary {
-        op: WithSpan<UnaryOperator, S>,
-        expr: Handle<Expression<'a, S>>,
+        op: SpannedLeaf<UnaryOperator, S>,
+        expr: ExpressionHandle<'a, S>,
     },
     Binary {
-        lhs: Handle<Expression<'a, S>>,
-        op: WithSpan<BinaryOperator, S>,
-        rhs: Handle<Expression<'a, S>>,
+        lhs: ExpressionHandle<'a, S>,
+        op: SpannedLeaf<BinaryOperator, S>,
+        rhs: ExpressionHandle<'a, S>,
     },
     Index {
-        base: Handle<Expression<'a, S>>,
-        index: Handle<Expression<'a, S>>,
+        base: ExpressionHandle<'a, S>,
+        index: ExpressionHandle<'a, S>,
     },
     Swizzle {
-        base: Handle<Expression<'a, S>>,
-        swizzle: WithSpan<Swizzle, S>,
+        base: ExpressionHandle<'a, S>,
+        swizzle: SpannedLeaf<Swizzle, S>,
     },
     MemberAccess {
-        base: Handle<Expression<'a, S>>,
-        member: WithSpan<&'a str, S>,
+        base: ExpressionHandle<'a, S>,
+        member: SpannedLeaf<&'a str, S>,
     },
-    Parenthesized(Handle<Expression<'a, S>>),
+    Parenthesized(ExpressionHandle<'a, S>),
 }
 
 const _: () = {
     // Check Expression is Clone
     fn assert_clone<T: Clone>() {}
     fn assert_all() {
-        assert_clone::<Expression<'static, spans::SpansPresent>>();
+        assert_clone::<Expression<'static, text_spans::SpansPresent>>();
         #[cfg(feature = "span_erasure")]
-        assert_clone::<Expression<'static, spans::SpansErased>>();
+        assert_clone::<Expression<'static, text_spans::SpansErased>>();
     }
 };
 
 #[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for Handle<Expression<'a, S>> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
-
-    fn eq_in<'b>(
-        &'b self,
-        own_context: &'b Self::Context<'b>,
-        other: &'b Self,
-        other_context: &'b Self::Context<'b>,
-    ) -> bool {
-        let lhs = &own_context[*self];
-        let rhs = &other_context[*other];
-        return lhs.eq_in(own_context, rhs, other_context);
-    }
-}
-
-#[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for Range<Handle<Expression<'a, S>>> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S>
-    where
-        'a: 'b;
-
-    fn eq_in<'b>(
-        &'b self,
-        own_context: &'b Self::Context<'b>,
-        other: &'b Self,
-        other_context: &'b Self::Context<'b>,
-    ) -> bool {
-        let lhs_args = &own_context[self.clone()];
-        let rhs_args = &other_context[other.clone()];
-        if lhs_args.len() != rhs_args.len() {
-            return false;
-        }
-
-        for (lhs, rhs) in lhs_args.into_iter().zip(rhs_args) {
-            if !lhs.eq_in(own_context, rhs, other_context) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-}
-
-#[cfg(feature = "eq")]
-impl<'a, S: spans::SpanState> EqIn<'a> for Expression<'a, S> {
-    type Context<'b> = crate::arena::Arena<Expression<'a, S>, S> where 'a: 'b;
+impl<'a, S: text_spans::SpanState> EqIn<'a> for Expression<'a, S> {
+    type Context<'b> = ExpressionArena<'a, S> where 'a: 'b;
 
     fn eq_in<'b>(
         &'b self,
@@ -363,11 +324,54 @@ impl<'a, S: spans::SpanState> EqIn<'a> for Expression<'a, S> {
     }
 }
 
-impl<'a> Spanned for Expression<'a, spans::SpansPresent> {
-    #[cfg(feature = "span_erasure")]
-    type Spanless = Expression<'a, spans::SpansErased>;
+#[cfg(feature = "eq")]
+impl<'a, S: text_spans::SpanState> EqIn<'a> for ExpressionHandle<'a, S> {
+    type Context<'b> = ExpressionArena<'a, S> where 'a: 'b;
 
-    #[cfg(feature = "span_erasure")]
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        let lhs = &own_context[*self];
+        let rhs = &other_context[*other];
+        return lhs.eq_in(own_context, rhs, other_context);
+    }
+}
+
+#[cfg(feature = "eq")]
+impl<'a, S: text_spans::SpanState> EqIn<'a> for Range<ExpressionHandle<'a, S>> {
+    type Context<'b> = ExpressionArena<'a, S>
+    where
+        'a: 'b;
+
+    fn eq_in<'b>(
+        &'b self,
+        own_context: &'b Self::Context<'b>,
+        other: &'b Self,
+        other_context: &'b Self::Context<'b>,
+    ) -> bool {
+        let lhs_args = &own_context[self.clone()];
+        let rhs_args = &other_context[other.clone()];
+        if lhs_args.len() != rhs_args.len() {
+            return false;
+        }
+
+        for (lhs, rhs) in lhs_args.into_iter().zip(rhs_args) {
+            if !lhs.eq_in(own_context, rhs, other_context) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
+#[cfg(feature = "span_erasure")]
+impl<'a> Spanned for Expression<'a> {
+    type Spanless = Expression<'a, text_spans::SpansErased>;
+
     fn erase_spans(self) -> Self::Spanless {
         match self {
             Expression::Literal { value } => Expression::Literal { value },

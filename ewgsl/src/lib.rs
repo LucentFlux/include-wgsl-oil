@@ -1,6 +1,6 @@
 pub mod arena;
+pub mod composition;
 pub mod parsing;
-pub mod spans;
 
 /// Performs nice formatting to take a list of items and join them into a descriptive list,
 /// like the ones used when Rust-c says "expected `a`, `b`, `c`, or one of 96 others"
