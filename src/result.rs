@@ -1,8 +1,8 @@
-use std::{collections::HashMap, error::Error};
+use std::error::Error;
 
 use naga_to_tokenstream::{ModuleToTokens, ModuleToTokensConfig};
 
-use crate::{any_module_identifiers_start_with, source::Sourcecode};
+use crate::{exports::Export, source::Sourcecode};
 
 /// The output of the transformations provided by this crate.
 pub(crate) struct ShaderResult {
@@ -56,20 +56,8 @@ impl ShaderResult {
             .parent()
             .map(|path| path.to_path_buf())
             .expect("source should have a parent directory");
-        let mut dedecorated_names = HashMap::new();
-        for (dependent_module_name, dependent_path) in self.source.dependents() {
-            let sanitized_name =
-                naga_oil::compose::Composer::decorated_name(Some(dependent_module_name), "");
-            if !any_module_identifiers_start_with(&self.module, &sanitized_name) {
-                continue;
-            }
-
-            dedecorated_names.insert(
-                sanitized_name,
-                dependent_module_name.replace("/", "_").replace(".", "_"),
-            );
-
-            let dependent = pathdiff::diff_paths(dependent_path, &origin)
+        for dependent_path in self.source.dependents() {
+            let dependent = pathdiff::diff_paths(&**dependent_path, &origin)
                 .expect("relative path should be easy");
             let dependent = dependent.to_string_lossy();
             items.push(syn::parse_quote! {
@@ -82,8 +70,17 @@ impl ShaderResult {
         });
 
         // Convert to info about the module
+        let structs_filter = self
+            .source
+            .exports()
+            .iter()
+            .filter_map(|export| match export {
+                Export::Struct { struct_name } => Some(struct_name.clone()),
+                _ => None,
+            })
+            .collect();
         let mut module_items = self.module.to_items(ModuleToTokensConfig {
-            structs_filter: Some(self.source.exports().clone()),
+            structs_filter: Some(structs_filter),
         });
         items.append(&mut module_items);
 
