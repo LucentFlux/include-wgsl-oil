@@ -4,6 +4,7 @@ mod error;
 mod exports;
 mod files;
 mod imports;
+mod module;
 mod result;
 mod source;
 
@@ -11,15 +12,8 @@ use std::{fs::File, io::Read, path::PathBuf};
 
 use files::AbsoluteRustFilePathBuf;
 use quote::ToTokens;
-use regex::Regex;
 use source::Sourcecode;
 use syn::token::Brace;
-
-lazy_static::lazy_static! {
-    static ref IMPORT_CUSTOM_PATH_AS_REGEX: Regex = Regex::new(r"^\s*#\s*import\s+([^\s]+)\s+as\s+([^\s]+)").unwrap();
-    static ref IMPORT_CUSTOM_PATH_REGEX: Regex = Regex::new(r"^\s*#\s*import\s+([^\s]+)").unwrap();
-    static ref IMPORT_ITEMS_REGEX: Regex = Regex::new(r"^\s*#\s*import\s+([^\s]+)\s+((?:[\w|\d|_]+)(?:\s*,\s*[\w|\d|_]+)*)").unwrap();
-}
 
 // Hacky polyfill for `proc_macro::Span::source_file`
 fn find_me(root: &str, pattern: &str) -> Option<PathBuf> {
@@ -92,16 +86,17 @@ pub fn include_wgsl_oil(
 ) -> proc_macro::TokenStream {
     let mut module = syn::parse_macro_input!(module as syn::ItemMod);
     if let Some(content) = module.content {
-        let item = syn::parse_quote_spanned! {content.0.span=>
-            compile_error!(
-                "`include_wgsl_oil` expects an empty module into which to inject the shader objects, \
-                but found a module body - try replacing these curly braces and everything in them `{ ... }` \
-                with a single semicolon `;`.");
-        };
+        if content.1.len() > 0 {
+            let item = syn::parse_quote_spanned! {content.0.span=>
+                compile_error!(
+                    "`include_wgsl_oil` expects an empty module into which to inject the shader objects, \
+                    but found a module body - try removing everything within the curly braces `{ ... }`.");
+            };
 
-        module.semi = None;
-        module.content = Some((Brace::default(), vec![item]));
-        return module.to_token_stream().into();
+            module.semi = None;
+            module.content = Some((Brace::default(), vec![item]));
+            return module.to_token_stream().into();
+        }
     }
 
     let requested_path = syn::parse_macro_input!(path as syn::LitStr);

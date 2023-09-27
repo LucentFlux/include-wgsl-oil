@@ -4,13 +4,19 @@ use std::{
     path::PathBuf,
 };
 
-use daggy::petgraph::visit::IntoNodeReferences;
-use naga_oil::compose::{ComposableModuleDescriptor, ShaderDefValue, ShaderLanguage};
+use daggy::{petgraph::visit::IntoNodeReferences, Walker};
+use regex::{Captures, Regex};
 
 use crate::{
     files::{AbsoluteRustRootPathBuf, AbsoluteWGSLFilePathBuf},
-    IMPORT_CUSTOM_PATH_AS_REGEX, IMPORT_CUSTOM_PATH_REGEX, IMPORT_ITEMS_REGEX,
+    module::Module,
 };
+
+lazy_static::lazy_static! {
+    static ref IMPORT_CUSTOM_PATH_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+)").unwrap();
+    static ref IMPORT_CUSTOM_PATH_AS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+)\s+as\s+([^\s]+)").unwrap();
+    static ref IMPORT_ITEMS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+)\s+((?:[\w|\d|_]+)(?:\s*,\s*[\w|\d|_]+)*)").unwrap();
+}
 
 /// Finds an arbitrary path between two nodes in a dag.
 fn find_any_path<N, E>(
@@ -24,54 +30,61 @@ fn find_any_path<N, E>(
 }
 
 /// Finds all import declarations in a source file, returning all of the paths given.
-fn all_imports_in_source<'a>(source: &'a str) -> Vec<&'a str> {
-    let mut requirements = Vec::new();
-    for import in IMPORT_CUSTOM_PATH_AS_REGEX.captures_iter(&source) {
-        requirements.push(import.get(1).unwrap().as_str())
-    }
+fn all_imports_in_source<'a>(source: &'a str) -> HashSet<&'a str> {
+    let mut requirements = HashSet::new();
     for import in IMPORT_CUSTOM_PATH_REGEX.captures_iter(&source) {
-        requirements.push(import.get(1).unwrap().as_str())
+        requirements.insert(import.get(1).unwrap().as_str());
+    }
+    for import in IMPORT_CUSTOM_PATH_AS_REGEX.captures_iter(&source) {
+        requirements.insert(import.get(1).unwrap().as_str());
     }
     for import in IMPORT_ITEMS_REGEX.captures_iter(&source) {
-        requirements.push(import.get(1).unwrap().as_str())
+        requirements.insert(import.get(1).unwrap().as_str());
     }
     return requirements;
 }
 
-/// Given a path to a file and the string given to describe an import, tries to resolve the requested import file.
-fn resolve_import(
-    importing: &AbsoluteWGSLFilePathBuf,
+/// Finds all import declarations in a source file, returning all of the paths given.
+fn replace_import_names_in_source<'a>(
+    source: &'a str,
+    subs: impl Fn(&str) -> Option<String>,
+) -> String {
+    let source = IMPORT_CUSTOM_PATH_REGEX.replace_all(source, |capture: &Captures<'_>| {
+        let full = capture.get(0).unwrap().as_str();
+
+        let name = capture.get(1).unwrap().as_str();
+        let sub = match subs(name) {
+            Some(sub) => sub,
+            None => return full.to_owned(),
+        };
+
+        let sub = format!("{:^len$}", sub, len = name.len());
+
+        capture.get(0).unwrap().as_str().replace(name, &sub)
+    });
+
+    return source.to_string();
+}
+
+pub(crate) fn replace_imports_in_source(
+    source: &str,
+    importing: &Module,
     source_root: Option<&AbsoluteRustRootPathBuf>,
-    request_string: &str,
-) -> Result<PathBuf, Vec<PathBuf>> {
-    let mut tried_paths = Vec::new();
-
-    // Try interpret as relative to importing file
-    let relative = importing.join(request_string);
-    tried_paths.push(relative.clone());
-    if relative.exists() {
-        return Ok(relative.canonicalize().unwrap());
-    }
-
-    // Try interpret as relative to source root
-    if let Some(source_root) = source_root {
-        let relative = source_root.join(request_string);
-        tried_paths.push(relative.clone());
-        if relative.exists() {
-            return Ok(relative.canonicalize().unwrap());
-        }
-    }
-
-    return Err(tried_paths);
+    module_names: &HashMap<Module, String>,
+) -> String {
+    replace_import_names_in_source(&source, |request_string| {
+        let import = Module::resolve_module(importing, source_root.clone(), request_string).ok()?;
+        module_names.get(&import).cloned()
+    })
 }
 
 pub(crate) enum ImportResolutionError {
     Cycle {
-        cycle_path: Vec<AbsoluteWGSLFilePathBuf>,
+        cycle_path: Vec<Module>,
     },
     Unresolved {
         requested: String,
-        importer: PathBuf,
+        importer: Module,
         searched: HashSet<PathBuf>,
     },
 }
@@ -82,9 +95,9 @@ impl Display for ImportResolutionError {
             ImportResolutionError::Cycle { cycle_path } => {
                 write!(f, "found import cycle: \n")?;
                 for node in cycle_path {
-                    write!(f, "`{}` ->\n", node.display())?;
+                    write!(f, "`{}` ->\n", node)?;
                 }
-                write!(f, "`{}`", cycle_path.first().unwrap().display())
+                write!(f, "`{}`", cycle_path.first().unwrap())
             }
             ImportResolutionError::Unresolved {
                 requested,
@@ -95,7 +108,7 @@ impl Display for ImportResolutionError {
                     f,
                     "could not resolve import `{}` in file `{}`:\nlooked in location(s) {}",
                     requested,
-                    importer.display(),
+                    importer,
                     searched
                         .into_iter()
                         .map(|path| format!("`{}`", path.display()))
@@ -108,7 +121,7 @@ impl Display for ImportResolutionError {
 
 /// Gives all of the files required for a module and the order in which they need to be processed by `naga_oil::compose`.
 pub(crate) struct ImportOrder {
-    dag: daggy::Dag<AbsoluteWGSLFilePathBuf, ()>,
+    dag: daggy::Dag<Module, ()>,
     node_of_interest: daggy::NodeIndex,
 }
 
@@ -118,26 +131,20 @@ impl ImportOrder {
         absolute_source_path: AbsoluteWGSLFilePathBuf,
         source_root: Option<&AbsoluteRustRootPathBuf>,
     ) -> Result<Self, ImportResolutionError> {
-        assert!(absolute_source_path.is_file());
-        assert!(absolute_source_path.is_absolute());
+        let root_import = Module::from_path(absolute_source_path);
 
-        let mut order = daggy::Dag::<AbsoluteWGSLFilePathBuf, ()>::new();
+        let mut order = daggy::Dag::<Module, ()>::new();
         let mut nodes = HashMap::new();
 
         // Follow a DFS over imports, detecting cycles using daggy.
-        let mut search_front = std::collections::VecDeque::from(vec![(
-            Option::<AbsoluteWGSLFilePathBuf>::None,
-            absolute_source_path.clone(),
-        )]);
-        while let Some((importing_path, imported_path)) = search_front.pop_front() {
-            assert!(imported_path.is_file());
-            assert!(imported_path.is_absolute());
-
+        let mut search_front =
+            std::collections::VecDeque::from(vec![(Option::<Module>::None, root_import.clone())]);
+        while let Some((importing_path, imported)) = search_front.pop_front() {
             // If we haven't seen the dependency before, add it to the record
-            let imported_node = match nodes.get(&imported_path) {
+            let imported_node = match nodes.get(&imported) {
                 None => {
-                    let node = order.add_node(imported_path.clone());
-                    nodes.insert(imported_path.clone(), node);
+                    let node = order.add_node(imported.clone());
+                    nodes.insert(imported.clone(), node);
                     node
                 }
                 Some(node) => *node,
@@ -162,20 +169,14 @@ impl ImportOrder {
             }
 
             // Then add the imports requested by this file
-            let source = match std::fs::read_to_string(&*imported_path) {
-                Ok(source) => source,
-                Err(_) => continue,
-            };
+            let source = imported.read_to_string();
             for requested in all_imports_in_source(&source) {
-                match resolve_import(&imported_path, source_root, requested) {
-                    Ok(import) => search_front.push_back((
-                        Some(imported_path.clone()),
-                        AbsoluteWGSLFilePathBuf::new(import),
-                    )),
+                match Module::resolve_module(&imported, source_root, requested) {
+                    Ok(import) => search_front.push_back((Some(imported.clone()), import)),
                     Err(err) => {
                         return Err(ImportResolutionError::Unresolved {
                             requested: requested.to_owned(),
-                            importer: imported_path.to_path_buf(),
+                            importer: imported,
                             searched: err.into_iter().collect(),
                         });
                     }
@@ -185,48 +186,56 @@ impl ImportOrder {
 
         return Ok(ImportOrder {
             dag: order,
-            node_of_interest: nodes[&absolute_source_path],
+            node_of_interest: nodes[&root_import],
         });
     }
 
     /// Gives a vector of every node that needs to be imported, in order of import from leaf to the node of interest.
     /// The root node is excluded from the import order.
-    fn import_order(&self) -> Vec<daggy::NodeIndex> {
-        let mut res_reversed = Vec::new();
+    fn import_order(mut self) -> Vec<Module> {
+        let mut res = Vec::new();
 
-        let mut dfs = daggy::petgraph::visit::Bfs::new(&self.dag, self.node_of_interest);
-        while let Some(node) = dfs.next(&self.dag) {
-            if node != self.node_of_interest {
-                res_reversed.push(node);
+        // Drain dag
+        while self.dag.node_count() > 0 {
+            let mut removed_one = false;
+            for (node, _) in self.dag.node_references() {
+                // If no children, import
+                if self.dag.children(node).iter(&self.dag).next().is_none() {
+                    let import = self
+                        .dag
+                        .remove_node(node)
+                        .expect("iterating over node ids present");
+
+                    // Don't need to import the root node
+                    if node != self.node_of_interest {
+                        res.push(import);
+                    }
+
+                    removed_one = true;
+                    break;
+                }
             }
+            assert!(removed_one, "DAGs must always have a node with no children");
         }
 
-        res_reversed.reverse();
-        return res_reversed;
+        return res;
     }
 
     /// Generates versions of the paths referred to by this import set, to deduplicate imports in `naga_oil` which refer to the same file but use a different path.
-    pub(crate) fn reduced_names(&self) -> HashMap<AbsoluteWGSLFilePathBuf, String> {
+    pub(crate) fn reduced_names(&self) -> HashMap<Module, String> {
         let mut forwards = HashMap::new();
         let mut backwards = HashMap::new();
 
         // Assign names by increasing the amount of the path present until distinguished
         // First assign each path just its suffix, without the extension
-        for (_, path) in self.dag.node_references() {
-            let file_name = path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .split(".")
-                .next()
-                .unwrap()
-                .to_string();
+        for (_, import) in self.dag.node_references() {
+            let file_name = import.file_name().to_string();
 
-            forwards.insert(path.clone(), file_name.clone());
+            forwards.insert(import.clone(), file_name.clone());
             backwards
                 .entry(file_name)
                 .or_insert(vec![])
-                .push((1usize, path.clone()));
+                .push((1usize, import.clone()));
         }
 
         // Then remove from backwards any non-collisions and resolve collisions until no collisions are present
@@ -238,101 +247,32 @@ impl ImportOrder {
                 continue;
             }
 
-            for (i, (path_size, path)) in collisions.into_iter().enumerate() {
-                forwards.remove(&path);
+            for (i, (path_size, import)) in collisions.into_iter().enumerate() {
+                forwards.remove(&import);
 
-                let path_part_count = path.components().count();
-                let new_name = if path_size >= path_part_count {
-                    colliding_name.clone() + &format!("{}", i)
+                let new_name = if let Some(extra_component) = import.nth_path_component(path_size) {
+                    colliding_name.clone() + "_" + &extra_component
                 } else {
-                    let extra_component = path
-                        .components()
-                        .rev()
-                        .skip(path_size)
-                        .next()
-                        .expect("checked len was less than size")
-                        .as_os_str()
-                        .to_string_lossy();
-                    colliding_name.clone() + &extra_component
+                    colliding_name.clone() + &format!("{}", i)
                 };
 
-                forwards.insert(path.clone(), new_name.clone());
+                forwards.insert(import.clone(), new_name.clone());
                 backwards
                     .entry(new_name)
                     .or_insert(vec![])
-                    .push((path_size + 1, path.clone()));
+                    .push((path_size + 1, import.clone()));
             }
         }
 
         return forwards;
     }
 
-    /// Gives an iterator over every file that needs to be imported, in order of import from leaf to the node of interest.
-    /// The root node is excluded from the iterator.
-    pub(crate) fn iter<'a>(&'a self) -> impl Iterator<Item = Import<'a>> {
-        self.import_order().into_iter().map(|node| Import {
-            path: &self.dag[node],
-        })
-    }
-}
-
-pub(crate) struct OwnedComposableImport {
-    source: String,
-    file_path: String,
-    as_name: Option<String>,
-    shader_defs: HashMap<String, ShaderDefValue>,
-}
-
-impl OwnedComposableImport {
-    pub(crate) fn borrow_composable_descriptor<'a>(&'a self) -> ComposableModuleDescriptor<'a> {
-        ComposableModuleDescriptor {
-            source: &self.source,
-            file_path: &self.file_path,
-            language: ShaderLanguage::Wgsl,
-            as_name: self.as_name.clone(),
-            additional_imports: &[],
-            shader_defs: self.shader_defs.clone(),
-        }
-    }
-}
-
-/// A single requested import to a shader.
-pub(crate) struct Import<'a> {
-    path: &'a AbsoluteWGSLFilePathBuf,
-}
-
-impl<'a> Import<'a> {
-    pub(crate) fn to_composable_module_descriptor(
-        &self,
-        module_names: &HashMap<AbsoluteWGSLFilePathBuf, String>,
-        definitions: HashMap<String, ShaderDefValue>,
-    ) -> Result<OwnedComposableImport, Vec<String>> {
-        let source = match std::fs::read_to_string(&**self.path) {
-            Ok(source) => source,
-            Err(e) => panic!("failed to read `wgsl` source file: {}", e),
-        };
-
-        if source.contains("#define") {
-            return Err(vec![format!(
-                r"imported shader file `{}` contained a `#define` statement \
-                - only top-level files may contain preprocessor definitions",
-                self.path.display()
-            )]);
-        }
-
-        // Replace `@export` directives with equivalent whitespace
-        let source = source.replace("@export", "       ");
-
-        let name = &module_names[&*self.path];
-        Ok(OwnedComposableImport {
-            source,
-            file_path: self.path.to_string_lossy().to_string(),
-            as_name: Some(name.clone()),
-            shader_defs: definitions,
-        })
-    }
-
-    pub(crate) fn path(&self) -> AbsoluteWGSLFilePathBuf {
-        self.path.clone()
+    /// Gives a vector containing every file that needs to be imported, in order of import from leaf to the node of interest,
+    /// and the root module.
+    pub(crate) fn modules(self) -> (Vec<Module>, Module) {
+        let root = self.dag[self.node_of_interest].clone();
+        let imports = self.import_order();
+        assert!(!imports.contains(&root));
+        return (imports, root);
     }
 }

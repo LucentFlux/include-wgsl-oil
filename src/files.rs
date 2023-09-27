@@ -27,6 +27,12 @@ impl Deref for AbsoluteRustRootPathBuf {
     }
 }
 
+impl std::fmt::Debug for AbsoluteRustRootPathBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
 /// A PathBuf that is absolute, exists and points to a Rust file
 pub(crate) struct AbsoluteRustFilePathBuf {
     inner: PathBuf,
@@ -131,6 +137,12 @@ impl Deref for AbsoluteRustFilePathBuf {
     }
 }
 
+impl std::fmt::Debug for AbsoluteRustFilePathBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
 /// A PathBuf that is absolute, exists and points to a WGSL file
 #[derive(Hash, PartialEq, Eq, Clone)]
 pub(crate) struct AbsoluteWGSLFilePathBuf {
@@ -162,5 +174,11 @@ impl Deref for AbsoluteWGSLFilePathBuf {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl std::fmt::Debug for AbsoluteWGSLFilePathBuf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
     }
 }

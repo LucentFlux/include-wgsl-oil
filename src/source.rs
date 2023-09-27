@@ -3,7 +3,7 @@ use std::{
     ffi::OsStr,
 };
 
-use naga_oil::compose::{Composer, NagaModuleDescriptor};
+use naga_oil::compose::Composer;
 
 use crate::{
     exports::{strip_exports, Export},
@@ -107,41 +107,55 @@ impl Sourcecode {
         let reduced_names = import_order.reduced_names();
 
         // Add imports in order to naga-oil
-        for import in import_order.iter() {
-            let res =
-                match import.to_composable_module_descriptor(&reduced_names, shader_defs.clone()) {
-                    Ok(desc) => composer.add_composable_module(desc.borrow_composable_descriptor()),
-                    Err(errors) => {
-                        for error in errors {
-                            self.push_error(error);
-                        }
-                        continue;
-                    }
-                };
-
+        let (imports, root) = import_order.modules();
+        for import in imports {
             self.dependents.push(import.path());
 
+            let desc = import.to_composable_module_descriptor(
+                &reduced_names,
+                self.project_root.as_ref(),
+                shader_defs.clone(),
+            );
+            let desc = match desc {
+                Ok(desc) => desc,
+                Err(errors) => {
+                    for error in errors {
+                        self.push_error(error);
+                    }
+                    return None;
+                }
+            };
+
+            let res = composer.add_composable_module(desc.borrow_composable_descriptor());
             if let Err(e) = res {
-                self.push_error(crate::error::format_compose_error(e, &composer))
+                self.push_error(crate::error::format_compose_error(e, &composer));
             }
         }
 
-        let root_src =
-            std::fs::read_to_string(&*self.source_path).expect("asserted was file in constructor");
-        let res = composer.make_naga_module(NagaModuleDescriptor {
-            source: &root_src,
-            file_path: &self.requested_path_input,
-            shader_type: naga_oil::compose::ShaderType::Wgsl,
-            shader_defs,
-            additional_imports: &[],
-        });
+        if !self.errors.is_empty() {
+            return None;
+        }
+
+        // Add main module to link everything
+        let desc =
+            root.to_naga_module_descriptor(&reduced_names, self.project_root.as_ref(), shader_defs);
+        let desc = match desc {
+            Ok(desc) => desc,
+            Err(errors) => {
+                for error in errors {
+                    self.push_error(error);
+                }
+                return None;
+            }
+        };
+        let res = composer.make_naga_module(desc.borrow_module_descriptor());
 
         match res {
-            Ok(module) => Some(module),
+            Ok(module) => return Some(module),
             Err(e) => {
                 self.push_error(crate::error::format_compose_error(e, &composer));
 
-                None
+                return None;
             }
         }
     }
