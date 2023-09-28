@@ -25,7 +25,7 @@ lazy_static = "1.4"
 daggy = "0.8"
 
 # Try to get cargo to match versions with naga and naga_oil by having a huge range
-data-encoding = "*" 
+data-encoding = "2" 
 
 [dev-dependencies]
 encase = {version = "0.6", features = ["glam"]}
