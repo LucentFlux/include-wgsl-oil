@@ -48,44 +48,14 @@ fn find_me(root: &str, pattern: &str) -> Option<PathBuf> {
     }
 }
 
-/*fn any_module_identifiers_start_with(module: &naga::Module, pat: &str) -> bool {
-    for (_, ty) in module.types.iter() {
-        if let Some(name) = ty.name.as_ref() {
-            if name.starts_with(pat) {
-                return true;
-            }
-        }
-    }
-    for (_, con) in module.constants.iter() {
-        if let Some(name) = con.name.as_ref() {
-            if name.starts_with(pat) {
-                return true;
-            }
-        }
-    }
-    for (_, func) in module.functions.iter() {
-        if let Some(name) = func.name.as_ref() {
-            if name.starts_with(pat) {
-                return true;
-            }
-        }
-    }
-    for entry in module.entry_points.iter() {
-        if entry.name.starts_with(pat) {
-            return true;
-        }
-    }
-
-    return false;
-}*/
-
 #[proc_macro_attribute]
 pub fn include_wgsl_oil(
     path: proc_macro::TokenStream,
     module: proc_macro::TokenStream,
 ) -> proc_macro::TokenStream {
+    // Parse module definitions and error if it contains anything
     let mut module = syn::parse_macro_input!(module as syn::ItemMod);
-    if let Some(content) = module.content {
+    if let Some(content) = &mut module.content {
         if content.1.len() > 0 {
             let item = syn::parse_quote_spanned! {content.0.span=>
                 compile_error!(
@@ -93,11 +63,12 @@ pub fn include_wgsl_oil(
                     but found a module body - try removing everything within the curly braces `{ ... }`.");
             };
 
-            module.semi = None;
             module.content = Some((Brace::default(), vec![item]));
-            return module.to_token_stream().into();
         }
+    } else {
+        module.content = Some((Brace::default(), vec![]));
     }
+    module.semi = None;
 
     let requested_path = syn::parse_macro_input!(path as syn::LitStr);
     let requested_path = requested_path.value();
@@ -121,8 +92,12 @@ pub fn include_wgsl_oil(
     result.validate();
 
     // Inject items
-    module.semi = None;
-    module.content = Some((Brace::default(), result.to_items()));
+    module
+        .content
+        .as_mut()
+        .expect("set to some at start")
+        .1
+        .append(&mut result.to_items());
 
     return module.to_token_stream().into();
 }

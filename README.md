@@ -35,9 +35,9 @@ mod my_shader {
 println!("shader source: {}", my_shader::SOURCE); 
 ```
 
-# Includes
+# Imports
 
-Shader includes are processed relative to the root of the crate source folder, and shaders may only include other shaders that are 'below' them in the directory tree. This forms an implicit inheritence hierarchy which prevents recursive imports.
+Shader imports are processed both relative to the importing file, and relative to the root of the crate source folder, and shaders may import any other shaders so long as there is no circular dependency on imports between files.
 
 For example, if your crate directory structure looks like the following:
 
@@ -45,6 +45,8 @@ For example, if your crate directory structure looks like the following:
 my-crate/
 ├─ src/
 │  ├─ submodule/
+│  │  ├─ subsubmodule/
+│  │  │  ├─ extra_special_shader.wgsl
 │  │  ├─ special_shader.wgsl
 │  │  ├─ mod.rs
 │  ├─ general_shader.wgsl
@@ -52,12 +54,22 @@ my-crate/
 ├─ Cargo.toml
 ```
 
-Then `special_shader.wgsl` is able to include `general_shader.wgsl`, and would do so with the following first line:
+Then `special_shader.wgsl` is able to include `general_shader.wgsl` with either of the following lines:
 
 ```text
-#include general_shader.wgsl as GeneralShader
+#import general_shader.wgsl as GeneralShader
+#import ../general_shader.wgsl as GeneralShader
 
 GeneralShader::foo();
+```
+
+And `extra_special_shader.wgsl` is able to include `special_shader.wgsl` with either of the following lines:
+
+```text
+#import ../special_shader.wgsl as SpecialShader
+#import submodule/special_shader.wgsl as SpecialShader
+
+SpecialShader::foo();
 ```
 
 # Exported Types

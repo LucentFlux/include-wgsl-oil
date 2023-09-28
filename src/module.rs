@@ -164,7 +164,7 @@ impl Module {
     pub(crate) fn file_name(&self) -> String {
         let name = self.path.file_name().unwrap().to_string_lossy();
         assert!(name.ends_with(".wgsl"));
-        return name[..(name.len() - 4)].to_owned();
+        return name[..(name.len() - 5)].to_owned();
     }
 
     pub(crate) fn nth_path_component<'a>(&'a self, i: usize) -> Option<Cow<'a, str>> {

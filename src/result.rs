@@ -76,7 +76,6 @@ impl ShaderResult {
             .iter()
             .filter_map(|export| match export {
                 Export::Struct { struct_name } => Some(struct_name.clone()),
-                _ => None,
             })
             .collect();
         let mut module_items = self.module.to_items(ModuleToTokensConfig {
