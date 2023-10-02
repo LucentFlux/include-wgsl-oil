@@ -24,7 +24,7 @@ This crate also uses [`naga-to-tokenstream`](https://crates.io/crates/naga-to-to
 
 # Getting started
 
-Including a shader module follows similar syntax to the Rust `include_str` or `include_bytes` macros, where a path is given relative to the containing folder of the Rust file that the macro is invoked from. However the `include_wgsl_oil` macro generates a large number of constants, so it is recommended to invoke the macro inside a module:
+Including a shader module follows similar syntax to the Rust `include_str` or `include_bytes` macros, where a path is given relative to the containing folder of the Rust file that the macro is invoked from. However the `include_wgsl_oil` macro generates a large number of objects, so it is instead invoked as an attribute to a module that you would like it to populate with shader information:
 
 ```rust ignore
 #[include_wgsl_oil::include_wgsl_oil("path/to/shader.wgsl")]
