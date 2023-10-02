@@ -27,9 +27,8 @@ This crate also uses [`naga-to-tokenstream`](https://crates.io/crates/naga-to-to
 Including a shader module follows similar syntax to the Rust `include_str` or `include_bytes` macros, where a path is given relative to the containing folder of the Rust file that the macro is invoked from. However the `include_wgsl_oil` macro generates a large number of constants, so it is recommended to invoke the macro inside a module:
 
 ```rust ignore
-mod my_shader {
-    include_wgsl_oil::include_wgsl_oil! {"path/to/shader.wgsl"}
-}
+#[include_wgsl_oil::include_wgsl_oil("path/to/shader.wgsl")]
+mod my_shader {}
 
 // The preprocessed sourcecode constant string can be found in the `SOURCE` constant at the root of the module:
 println!("shader source: {}", my_shader::SOURCE); 
@@ -86,9 +85,8 @@ Structs defined in your shader can be exported as an equivalent Rust struct. To 
 Then, in your Rust file, you can do the following:
 
 ```rust ignore
-mod my_shader {
-    include_wgsl_oil::include_wgsl_oil! {"path/to/shader.wgsl"}
-}
+#[include_wgsl_oil::include_wgsl_oil("path/to/shader.wgsl")]
+mod my_shader { }
 
 let my_instance = my_shader::types::MyStruct {
     foo: 12,
