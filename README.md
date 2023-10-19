@@ -1,5 +1,6 @@
 # Include WGSL-oil
 [![crates.io](https://img.shields.io/crates/v/include-wgsl-oil.svg)](https://crates.io/crates/include-wgsl-oil)
+[![docs.rs](https://img.shields.io/docsrs/include-wgsl-oil)](https://docs.rs/include-wgsl-oil/latest/include_wgsl_oil/)
 [![crates.io](https://img.shields.io/crates/l/include-wgsl-oil.svg)](https://github.com/LucentFlux/include-wgsl-oil/blob/main/LICENSE)
 
 Provides a macro for including a wgsl file, using the [`naga-oil`](https://crates.io/crates/naga-oil) preprocessor at compile time.
