@@ -1,6 +1,6 @@
 [package]
 name = "include-wgsl-oil"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 license = "MIT"
 description = "Includes a WGSL file with the `naga-oil` preprocessor. "
@@ -15,7 +15,7 @@ include = ["/Cargo.toml", "/LICENSE", "/README.md", "/src/**"]
 syn = { version = "2.0", features = ["full"] }
 naga = { version = "0.14", features = ["wgsl-in", "wgsl-out"] }
 naga_oil = "0.10"
-naga-to-tokenstream = "0.3"
+naga-to-tokenstream = "0.4"
 proc-macro2 = "1.0"
 quote = "1.0"
 glob = "0.3"
