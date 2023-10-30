@@ -15,7 +15,7 @@ include = ["/Cargo.toml", "/LICENSE", "/README.md", "/src/**"]
 syn = { version = "2.0", features = ["full"] }
 naga = { version = "0.13", features = ["wgsl-in", "wgsl-out"] }
 naga_oil = "0.10"
-naga-to-tokenstream = "0.3"
+naga-to-tokenstream = "0.4"
 proc-macro2 = "1.0"
 quote = "1.0"
 glob = "0.3"
