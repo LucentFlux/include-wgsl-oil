@@ -29,7 +29,7 @@ data-encoding = "2"
 
 [dev-dependencies]
 encase = {version = "0.6", features = ["glam"]}
-glam = "0.24"
+glam = "0.25"
 
 [lib]
 proc-macro = true
