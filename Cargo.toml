@@ -28,7 +28,7 @@ daggy = "0.8"
 data-encoding = "2" 
 
 [dev-dependencies]
-encase = {version = "0.6", features = ["glam"]}
+encase = {version = "0.7", features = ["glam"]}
 glam = "0.24"
 
 [lib]
