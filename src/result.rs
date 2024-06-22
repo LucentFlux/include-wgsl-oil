@@ -80,6 +80,9 @@ impl ShaderResult {
             .collect();
         let mut module_items = self.module.to_items(ModuleToTokensConfig {
             structs_filter: Some(structs_filter),
+            gen_glam: cfg!(feature = "glam"),
+            gen_encase: cfg!(feature = "encase"),
+            gen_naga: cfg!(feature = "naga"),
         });
         items.append(&mut module_items);
 
