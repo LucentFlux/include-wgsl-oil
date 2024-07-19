@@ -13,9 +13,11 @@ use crate::{
 };
 
 lazy_static::lazy_static! {
-    static ref IMPORT_CUSTOM_PATH_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+)").unwrap();
-    static ref IMPORT_CUSTOM_PATH_AS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+)\s+as\s+([^\s]+)").unwrap();
-    static ref IMPORT_ITEMS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+)\s+((?:[\w|\d|_]+)(?:\s*,\s*[\w|\d|_]+)*)").unwrap();
+    static ref IMPORT_CUSTOM_PATH_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)").unwrap();
+    static ref IMPORT_CUSTOM_PATH_AS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s+as\s+([^\s]+)").unwrap();
+    static ref IMPORT_ITEMS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s+([^\s]+(?:\s*,\s*[^\s]+)*)").unwrap();
+    static ref IMPORT_SINGLE_ITEM_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s*::\s*([^\s]+)").unwrap();
+    static ref IMPORT_ITEMS_BRACKETS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s*::\s*\{\s*([^\s]+(?:\s*,\s*[^\s]+)*)\s*\}").unwrap();
 }
 
 /// Finds an arbitrary path between two nodes in a dag.
@@ -41,6 +43,12 @@ fn all_imports_in_source<'a>(source: &'a str) -> HashSet<&'a str> {
     for import in IMPORT_ITEMS_REGEX.captures_iter(&source) {
         requirements.insert(import.get(1).unwrap().as_str());
     }
+    for import in IMPORT_SINGLE_ITEM_REGEX.captures_iter(&source) {
+        requirements.insert(import.get(1).unwrap().as_str());
+    }
+    for import in IMPORT_ITEMS_BRACKETS_REGEX.captures_iter(&source) {
+        requirements.insert(import.get(1).unwrap().as_str());
+    }
     return requirements;
 }
 
@@ -58,7 +66,10 @@ fn replace_import_names_in_source<'a>(
             None => return full.to_owned(),
         };
 
-        let sub = format!("{:^len$}", sub, len = name.len());
+        // Right alignment is needed for naga_oil to correctly parse rust-style imports:
+        // `#import foo.wgsl::bar` will become `#import      foo::bar`
+        // naga_oil does not support spaces between import items
+        let sub = format!("{:>len$}", sub, len = name.len());
 
         capture.get(0).unwrap().as_str().replace(name, &sub)
     });
