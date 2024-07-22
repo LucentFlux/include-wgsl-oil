@@ -151,17 +151,17 @@ impl Sourcecode {
         let res = composer.make_naga_module(desc.borrow_module_descriptor());
 
         match res {
-            Ok(module) => return Some(module),
+            Ok(module) => Some(module),
             Err(e) => {
                 self.push_error(crate::error::format_compose_error(e, &composer));
 
-                return None;
+                None
             }
         }
     }
 
     pub(crate) fn complete(mut self) -> ShaderResult {
-        let module = self.compose().unwrap_or(naga::Module::default());
+        let module = self.compose().unwrap_or_default();
 
         ShaderResult::new(self, module)
     }

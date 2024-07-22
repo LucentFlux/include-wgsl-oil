@@ -19,14 +19,15 @@ use syn::token::Brace;
 fn find_me(root: &str, pattern: &str) -> Option<PathBuf> {
     let mut options = Vec::new();
 
-    for path in glob::glob(&std::path::Path::new(root).join("**/*.rs").to_string_lossy()).unwrap() {
-        if let Ok(path) = path {
-            if let Ok(mut f) = File::open(&path) {
-                let mut contents = String::new();
-                f.read_to_string(&mut contents).ok();
-                if contents.contains(pattern) {
-                    options.push(path.to_owned());
-                }
+    for path in glob::glob(&std::path::Path::new(root).join("**/*.rs").to_string_lossy())
+        .unwrap()
+        .flatten()
+    {
+        if let Ok(mut f) = File::open(&path) {
+            let mut contents = String::new();
+            f.read_to_string(&mut contents).ok();
+            if contents.contains(pattern) {
+                options.push(path.to_owned());
             }
         }
     }
@@ -56,7 +57,7 @@ pub fn include_wgsl_oil(
     // Parse module definitions and error if it contains anything
     let mut module = syn::parse_macro_input!(module as syn::ItemMod);
     if let Some(content) = &mut module.content {
-        if content.1.len() > 0 {
+        if !content.1.is_empty() {
             let item = syn::parse_quote_spanned! {content.0.span=>
                 compile_error!(
                     "`include_wgsl_oil` expects an empty module into which to inject the shader objects, \
@@ -97,7 +98,7 @@ pub fn include_wgsl_oil(
         .as_mut()
         .expect("set to some at start")
         .1
-        .append(&mut result.to_items());
+        .append(&mut result.items());
 
-    return module.to_token_stream().into();
+    module.to_token_stream().into()
 }

@@ -16,7 +16,7 @@ pub(crate) enum Export {
 pub(crate) fn strip_exports(source: &str) -> (String, HashSet<Export>) {
     let mut exports = HashSet::new();
 
-    let new_src = EXPORT_STRUCT_REGEX.replace_all(&source, |group: &regex::Captures<'_>| {
+    let new_src = EXPORT_STRUCT_REGEX.replace_all(source, |group: &regex::Captures<'_>| {
         let name = group.get(1).unwrap().as_str();
         exports.insert(Export::Struct {
             struct_name: name.to_owned(),
@@ -24,5 +24,5 @@ pub(crate) fn strip_exports(source: &str) -> (String, HashSet<Export>) {
         group.get(0).unwrap().as_str().replace("@export", "       ")
     });
 
-    return (new_src.into_owned(), exports);
+    (new_src.into_owned(), exports)
 }

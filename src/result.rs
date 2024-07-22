@@ -39,7 +39,7 @@ impl ShaderResult {
         }
     }
 
-    pub(crate) fn to_items(&mut self) -> Vec<syn::Item> {
+    pub(crate) fn items(&self) -> Vec<syn::Item> {
         let mut items = Vec::new();
 
         // Errors
@@ -74,8 +74,8 @@ impl ShaderResult {
             .source
             .exports()
             .iter()
-            .filter_map(|export| match export {
-                Export::Struct { struct_name } => Some(struct_name.clone()),
+            .map(|export| match export {
+                Export::Struct { struct_name } => struct_name.clone(),
             })
             .collect();
         let mut module_items = self.module.to_items(ModuleToTokensConfig {

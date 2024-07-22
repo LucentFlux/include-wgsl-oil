@@ -13,11 +13,11 @@ use crate::{
 };
 
 lazy_static::lazy_static! {
-    static ref IMPORT_CUSTOM_PATH_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)").unwrap();
-    static ref IMPORT_CUSTOM_PATH_AS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s+as\s+([^\s]+)").unwrap();
-    static ref IMPORT_ITEMS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s+([^\s]+(?:\s*,\s*[^\s]+)*)").unwrap();
-    static ref IMPORT_SINGLE_ITEM_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s*::\s*([^\s]+)").unwrap();
-    static ref IMPORT_ITEMS_BRACKETS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+\.wgsl)\s*::\s*\{\s*([^\s]+(?:\s*,\s*[^\s]+)*)\s*\}").unwrap();
+    static ref IMPORT_CUSTOM_PATH_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+?\.wgsl)").unwrap();
+    static ref IMPORT_CUSTOM_PATH_AS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+?\.wgsl)\s+as\s+([^\s]+)").unwrap();
+    static ref IMPORT_ITEMS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+?\.wgsl)\s+([^\s]+(?:\s*,\s*[^\s]+)*)").unwrap();
+    static ref IMPORT_SINGLE_ITEM_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+?\.wgsl)\s*::\s*([^\s{]+)").unwrap();
+    static ref IMPORT_ITEMS_BRACKETS_REGEX: Regex = Regex::new(r"(?:^|\n)\s*#\s*import\s+([^\s]+?\.wgsl)\s*::\s*\{\s*([^\s]+(?:\s*,\s*[^\s]+)*)\s*\}").unwrap();
 }
 
 /// Finds an arbitrary path between two nodes in a dag.
@@ -32,31 +32,28 @@ fn find_any_path<N, E>(
 }
 
 /// Finds all import declarations in a source file, returning all of the paths given.
-fn all_imports_in_source<'a>(source: &'a str) -> HashSet<&'a str> {
+fn all_imports_in_source(source: &str) -> HashSet<&str> {
     let mut requirements = HashSet::new();
-    for import in IMPORT_CUSTOM_PATH_REGEX.captures_iter(&source) {
+    for import in IMPORT_CUSTOM_PATH_REGEX.captures_iter(source) {
         requirements.insert(import.get(1).unwrap().as_str());
     }
-    for import in IMPORT_CUSTOM_PATH_AS_REGEX.captures_iter(&source) {
+    for import in IMPORT_CUSTOM_PATH_AS_REGEX.captures_iter(source) {
         requirements.insert(import.get(1).unwrap().as_str());
     }
-    for import in IMPORT_ITEMS_REGEX.captures_iter(&source) {
+    for import in IMPORT_ITEMS_REGEX.captures_iter(source) {
         requirements.insert(import.get(1).unwrap().as_str());
     }
-    for import in IMPORT_SINGLE_ITEM_REGEX.captures_iter(&source) {
+    for import in IMPORT_SINGLE_ITEM_REGEX.captures_iter(source) {
         requirements.insert(import.get(1).unwrap().as_str());
     }
-    for import in IMPORT_ITEMS_BRACKETS_REGEX.captures_iter(&source) {
+    for import in IMPORT_ITEMS_BRACKETS_REGEX.captures_iter(source) {
         requirements.insert(import.get(1).unwrap().as_str());
     }
-    return requirements;
+    requirements
 }
 
 /// Finds all import declarations in a source file, returning all of the paths given.
-fn replace_import_names_in_source<'a>(
-    source: &'a str,
-    subs: impl Fn(&str) -> Option<String>,
-) -> String {
+fn replace_import_names_in_source(source: &str, subs: impl Fn(&str) -> Option<String>) -> String {
     let source = IMPORT_CUSTOM_PATH_REGEX.replace_all(source, |capture: &Captures<'_>| {
         let full = capture.get(0).unwrap().as_str();
 
@@ -74,7 +71,7 @@ fn replace_import_names_in_source<'a>(
         capture.get(0).unwrap().as_str().replace(name, &sub)
     });
 
-    return source.to_string();
+    source.to_string()
 }
 
 pub(crate) fn replace_imports_in_source(
@@ -83,8 +80,8 @@ pub(crate) fn replace_imports_in_source(
     source_root: Option<&AbsoluteRustRootPathBuf>,
     module_names: &HashMap<Module, String>,
 ) -> String {
-    replace_import_names_in_source(&source, |request_string| {
-        let import = Module::resolve_module(importing, source_root.clone(), request_string).ok()?;
+    replace_import_names_in_source(source, |request_string| {
+        let import = Module::resolve_module(importing, source_root, request_string).ok()?;
         module_names.get(&import).cloned()
     })
 }
@@ -104,9 +101,9 @@ impl Display for ImportResolutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ImportResolutionError::Cycle { cycle_path } => {
-                write!(f, "found import cycle: \n")?;
+                writeln!(f, "found import cycle:")?;
                 for node in cycle_path {
-                    write!(f, "`{}` ->\n", node)?;
+                    writeln!(f, "`{}` ->", node)?;
                 }
                 write!(f, "`{}`", cycle_path.first().unwrap())
             }
@@ -121,7 +118,7 @@ impl Display for ImportResolutionError {
                     requested,
                     importer,
                     searched
-                        .into_iter()
+                        .iter()
                         .map(|path| format!("`{}`", path.display()))
                         .fold(String::new(), |a, b| a + ", " + &b)
                 )
@@ -168,7 +165,7 @@ impl ImportOrder {
                     .expect("importees should always be added before their imports");
 
                 let res = order.add_edge(importing_node, imported_node, ());
-                if let Err(_) = res {
+                if res.is_err() {
                     // Cycle on imports
                     let cycle_path = find_any_path(&order, imported_node, importing_node);
                     let cycle_path = cycle_path
@@ -195,10 +192,10 @@ impl ImportOrder {
             }
         }
 
-        return Ok(ImportOrder {
+        Ok(ImportOrder {
             dag: order,
             node_of_interest: nodes[&root_import],
-        });
+        })
     }
 
     /// Gives a vector of every node that needs to be imported, in order of import from leaf to the node of interest.
@@ -229,7 +226,7 @@ impl ImportOrder {
             assert!(removed_one, "DAGs must always have a node with no children");
         }
 
-        return res;
+        res
     }
 
     /// Generates versions of the paths referred to by this import set, to deduplicate imports in `naga_oil` which refer to the same file but use a different path.
@@ -275,7 +272,7 @@ impl ImportOrder {
             }
         }
 
-        return forwards;
+        forwards
     }
 
     /// Gives a vector containing every file that needs to be imported, in order of import from leaf to the node of interest,
@@ -284,6 +281,6 @@ impl ImportOrder {
         let root = self.dag[self.node_of_interest].clone();
         let imports = self.import_order();
         assert!(!imports.contains(&root));
-        return (imports, root);
+        (imports, root)
     }
 }

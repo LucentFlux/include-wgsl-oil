@@ -7,8 +7,8 @@ lazy_static::lazy_static! {
     static ref UNDECORATE_REGEX: Regex = Regex::new("_naga_oil_mod_([A-Z0-9]*)_member").unwrap();
 }
 
-fn demangle_mod_names<'a>(source: &'a str, pad: bool) -> Cow<'a, str> {
-    UNDECORATE_REGEX.replace_all(&source, |capture: &Captures<'_>| {
+fn demangle_mod_names(source: &str, pad: bool) -> Cow<'_, str> {
+    UNDECORATE_REGEX.replace_all(source, |capture: &Captures<'_>| {
         let module = capture.get(1).unwrap();
         let module = String::from_utf8(
             data_encoding::BASE32_NOPAD
@@ -36,10 +36,12 @@ pub(crate) fn format_compose_error(e: ComposerError, composer: &Composer) -> Str
             let source = composer
                 .module_sets
                 .get(name)
-                .expect(&format!(
-                    "while handling error could not find module {}: {:?}",
-                    name, e
-                ))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "while handling error could not find module {}: {:?}",
+                        name, e
+                    )
+                })
                 .sanitized_source
                 .clone();
             (name, source, *offset)
@@ -58,11 +60,11 @@ pub(crate) fn format_compose_error(e: ComposerError, composer: &Composer) -> Str
             let wgsl_error = e.emit_to_string_with_path(&source, source_name);
 
             // Demangle first line that probably contains type but not in context, so no padding required
-            let (first_line, other_lines) = wgsl_error.split_once("\n").unwrap();
-            let first_line = demangle_mod_names(&first_line, false);
+            let (first_line, other_lines) = wgsl_error.split_once('\n').unwrap();
+            let first_line = demangle_mod_names(first_line, false);
 
             // Demangle anything else
-            let other_lines = demangle_mod_names(&other_lines, true);
+            let other_lines = demangle_mod_names(other_lines, true);
 
             format!("wgsl parsing error: {}\n{}", first_line, other_lines)
         }

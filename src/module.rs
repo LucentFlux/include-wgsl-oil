@@ -18,7 +18,7 @@ pub(crate) struct OwnedComposableModuleDescriptor {
 }
 
 impl OwnedComposableModuleDescriptor {
-    pub(crate) fn borrow_composable_descriptor<'a>(&'a self) -> ComposableModuleDescriptor<'a> {
+    pub(crate) fn borrow_composable_descriptor(&self) -> ComposableModuleDescriptor<'_> {
         ComposableModuleDescriptor {
             source: &self.source,
             file_path: &self.file_path,
@@ -37,7 +37,7 @@ pub(crate) struct OwnedNagaModuleDescriptor {
 }
 
 impl OwnedNagaModuleDescriptor {
-    pub(crate) fn borrow_module_descriptor<'a>(&'a self) -> NagaModuleDescriptor<'a> {
+    pub(crate) fn borrow_module_descriptor(&self) -> NagaModuleDescriptor<'_> {
         NagaModuleDescriptor {
             source: &self.source,
             file_path: &self.file_path,
@@ -94,7 +94,7 @@ impl Module {
             }
         }
 
-        return Err(tried_paths);
+        Err(tried_paths)
     }
 
     pub(crate) fn to_composable_module_descriptor(
@@ -117,9 +117,9 @@ impl Module {
         let (source, _) = exports::strip_exports(&source);
 
         // Replace `#import` names with substitutions
-        let source = imports::replace_imports_in_source(&source, &self, source_root, module_names);
+        let source = imports::replace_imports_in_source(&source, self, source_root, module_names);
 
-        let name = &module_names[&self];
+        let name = &module_names[self];
         Ok(OwnedComposableModuleDescriptor {
             source,
             file_path: self.path.to_string_lossy().to_string(),
@@ -140,7 +140,7 @@ impl Module {
         let (source, _) = exports::strip_exports(&source);
 
         // Replace `#import` names with substitutions
-        let source = imports::replace_imports_in_source(&source, &self, source_root, module_names);
+        let source = imports::replace_imports_in_source(&source, self, source_root, module_names);
 
         Ok(OwnedNagaModuleDescriptor {
             source,
@@ -154,26 +154,27 @@ impl Module {
     }
 
     pub(crate) fn read_to_string(&self) -> String {
-        std::fs::read_to_string(&*self.path).expect(&format!(
-            "file `{}` exists but could not be read",
-            self.path.display()
-        ))
+        std::fs::read_to_string(&*self.path).unwrap_or_else(|_| {
+            panic!(
+                "file `{}` exists but could not be read",
+                self.path.display()
+            )
+        })
     }
 
     /// Gets the name of the file, without the `.wgsl` extension.
     pub(crate) fn file_name(&self) -> String {
         let name = self.path.file_name().unwrap().to_string_lossy();
         assert!(name.ends_with(".wgsl"));
-        return name[..(name.len() - 5)].to_owned();
+        name[..(name.len() - 5)].to_owned()
     }
 
-    pub(crate) fn nth_path_component<'a>(&'a self, i: usize) -> Option<Cow<'a, str>> {
+    pub(crate) fn nth_path_component(&self, i: usize) -> Option<Cow<'_, str>> {
         Some(
             self.path
                 .components()
                 .rev()
-                .skip(i)
-                .next()?
+                .nth(i)?
                 .as_os_str()
                 .to_string_lossy(),
         )
