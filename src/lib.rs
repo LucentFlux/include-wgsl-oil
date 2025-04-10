@@ -37,7 +37,7 @@ fn find_me(root: &str, pattern: &str) -> Option<PathBuf> {
         [v] => Some(v.clone()),
         _ => panic!(
             "found more than one contender for macro invocation location. \
-            This won't be an issue once `proc_macro_span` is stabalized, \
+            This won't be an issue once `proc_macro_span` is stabilized, \
             but until then each instance of the `include_wgsl_oil` \
             must be present in the source text, and each must have a unique argument. \
             found locations: {:?}",
@@ -80,7 +80,7 @@ pub fn include_wgsl_oil(
         None => {
             panic!(
                 "could not find invocation point - maybe it was in a macro? This won't be an issue once \
-                `proc_macro_span` is stabalized, but until then each instance of the `include_wgsl_oil` \
+                `proc_macro_span` is stabilized, but until then each instance of the `include_wgsl_oil` \
                 must be present in the source text, and each must have a unique argument."
             )
         }
