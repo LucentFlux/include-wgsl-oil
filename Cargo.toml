@@ -1,9 +1,9 @@
 [package]
 name = "include-wgsl-oil"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 license = "MIT"
-description = "Includes a WGSL file with the `naga-oil` preprocessor. "
+description = "Includes a WGSL file with the `naga-oil` preprocessor."
 homepage = "https://github.com/LucentFlux/include-wgsl-oil"
 repository = "https://github.com/LucentFlux/include-wgsl-oil"
 readme = "README.md"
@@ -13,9 +13,9 @@ include = ["/Cargo.toml", "/LICENSE", "/README.md", "/src/**"]
 
 [dependencies]
 syn = { version = "2.0", features = ["full"] }
-naga = { version = "22.0", features = ["wgsl-in", "wgsl-out"] }
-naga_oil = "0.15"
-naga-to-tokenstream = "0.7"
+naga = { version = "24.0", features = ["wgsl-in", "wgsl-out"] }
+naga_oil = "0.17"
+naga-to-tokenstream = "0.8"
 proc-macro2 = "1.0"
 quote = "1.0"
 glob = "0.3"
