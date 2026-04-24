@@ -22,7 +22,7 @@ glob = "0.3"
 pathdiff = "0.2"
 regex = "1.9"
 lazy_static = "1.5"
-daggy = "0.8"
+daggy = "0.9"
 
 # Try to get cargo to match versions with naga and naga_oil by having a huge range
 data-encoding = "2" 
